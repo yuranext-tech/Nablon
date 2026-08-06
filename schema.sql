@@ -2,7 +2,7 @@
 -- Принцип: только детерминированные события. Никакой семантики, никакого EIG.
 -- target_core — свободная метка для будущей сортировки, НЕ формальная сущность Semantic Registry.
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     telegram_id BIGINT UNIQUE NOT NULL,
     state TEXT NOT NULL DEFAULT 'NEW',
@@ -17,7 +17,7 @@ CREATE TABLE users (
     last_active_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE TABLE probes (
+CREATE TABLE IF NOT EXISTS probes (
     id SERIAL PRIMARY KEY,
     probe_code TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
@@ -31,7 +31,7 @@ CREATE TABLE probes (
     active BOOLEAN DEFAULT TRUE
 );
 
-CREATE TABLE observations (
+CREATE TABLE IF NOT EXISTS observations (
     id SERIAL PRIMARY KEY,
     user_id INT REFERENCES users(id),
     probe_id INT REFERENCES probes(id),
@@ -56,7 +56,7 @@ CREATE TABLE observations (
     invalid_reason TEXT
 );
 
-CREATE INDEX idx_observations_user_probe ON observations(user_id, probe_id);
-CREATE INDEX idx_observations_event ON observations(event_type, created_at);
-CREATE INDEX idx_observations_user_core ON observations(user_id, probe_code);
-CREATE INDEX idx_users_state ON users(state);
+CREATE INDEX IF NOT EXISTS idx_observations_user_probe ON observations(user_id, probe_id);
+CREATE INDEX IF NOT EXISTS idx_observations_event ON observations(event_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_observations_user_core ON observations(user_id, probe_code);
+CREATE INDEX IF NOT EXISTS idx_users_state ON users(state);
