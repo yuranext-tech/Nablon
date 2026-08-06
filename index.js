@@ -1,17 +1,24 @@
-// index.js — точка входа для Render (Background Worker или Web Service)
+// index.js — точка входа для Render (Background Worker)
 const cron = require('node-cron');
+const { runMigration } = require('./migrate');
 const { bot, dailyCronTick } = require('./bot');
 
-bot.launch();
-console.log('Bot started (long polling).');
+async function main() {
+  await runMigration(); // применяет schema.sql — локальный SQL-клиент не нужен
 
-// Каждый час проверяем всех пользователей и решаем, кому что отправить.
-// nextAction() внутри dailyCronTick сам разбирается, кому пора зонд,
-// кому вечерний вопрос, кому напоминание — так что можно дергать часто,
-// лишние вызовы для пользователей в состоянии ACTIVE/DORMANT просто no-op.
-cron.schedule('*/5 * * * *', () => {
-  dailyCronTick().catch((err) => console.error('dailyCronTick error:', err));
+  bot.launch();
+  console.log('Bot started (long polling).');
+
+  cron.schedule('*/5 * * * *', () => {
+    dailyCronTick().catch((err) => console.error('dailyCronTick error:', err));
+  });
+}
+
+main().catch((err) => {
+  console.error('Fatal startup error:', err);
+  process.exit(1);
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
