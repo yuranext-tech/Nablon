@@ -48,8 +48,22 @@ http
 async function main() {
   await runMigration(); // применяет schema.sql — локальный SQL-клиент не нужен
 
-  bot.launch();
-  console.log('Bot started (long polling).');
+  // На случай, если на боте случайно включён webhook (конфликтует с long polling
+  // и даёт ровно 409 Conflict) — явно снимаем его и сбрасываем зависшую очередь.
+  try {
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+  } catch (err) {
+    console.error('deleteWebhook failed (non-fatal):', err.message);
+  }
+
+  // launch() раньше падал необработанной ошибкой и убивал весь процесс при
+  // любом 409 — из-за этого один конфликт приводил к бесконечному циклу
+  // перезапусков. Теперь ошибка логируется, а не роняет health-check сервер.
+  bot.launch().catch((err) => {
+    console.error('bot.launch() failed:', err.message);
+    console.error('Bot is NOT running. Health-check server stays up so Render does not restart in a loop.');
+  });
+  console.log('Bot launch attempted (long polling).');
 
   cron.schedule('*/5 * * * *', () => {
     dailyCronTick().catch((err) => console.error('dailyCronTick error:', err));
@@ -61,5 +75,7 @@ main().catch((err) => {
   process.exit(1);
 });
 
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));process.once('SIGTERM', () => bot.stop('SIGTERM'));
