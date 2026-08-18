@@ -1,15 +1,45 @@
 // index.js — точка входа для Render (Web Service, бесплатный тариф)
 const http = require('http');
+const url = require('url');
 const cron = require('node-cron');
 const { runMigration } = require('./migrate');
-const { bot, dailyCronTick } = require('./bot');
+const { bot, dailyCronTick, pool } = require('./bot');
 
 // Render Web Service (free tier) требует слушать порт и засыпает без обращений
 // раз в ~15 минут. Health-check эндпоинт + внешний пинг (UptimeRobot) держат
 // процесс живым бесплатно — тот же приём, что уже применялся в Impact.
+//
+// /debug?key=<BOT_TOKEN> — временный способ посмотреть данные из браузера без
+// SQL-клиента. Защищён тем же токеном, что уже есть в env (репозиторий Public,
+// поэтому без защиты адрес был бы открыт всем). Убрать после теста.
 const PORT = process.env.PORT || 3000;
 http
-  .createServer((req, res) => {
+  .createServer(async (req, res) => {
+    const parsed = url.parse(req.url, true);
+
+    if (parsed.pathname === '/debug') {
+      if (parsed.query.key !== process.env.BOT_TOKEN) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('forbidden');
+        return;
+      }
+      try {
+        const users = await pool.query(
+          'SELECT id, telegram_id, state, last_probe_code, preferred_slot_hour, last_active_at FROM users ORDER BY id DESC'
+        );
+        const observations = await pool.query(
+          `SELECT id, user_id, probe_code, event_type, event_phase, response_payload, structured_fields, is_valid, invalid_reason, created_at
+           FROM observations ORDER BY created_at DESC LIMIT 20`
+        );
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ users: users.rows, observations: observations.rows }, null, 2));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('error: ' + err.message);
+      }
+      return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('ok');
   })
@@ -32,6 +62,4 @@ main().catch((err) => {
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));process.once('SIGTERM', () => bot.stop('SIGTERM'));
