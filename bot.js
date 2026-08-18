@@ -320,4 +320,4 @@ async function dailyCronTick() {
   }
 }
 
-module.exports = { bot, dailyCronTick, nextAction, pickNextProbe, sendProbe, sendEveningCheckin, computeProbeClarityScore };
+module.exports = { bot, dailyCronTick, nextAction, pickNextProbe, sendProbe, sendEveningCheckin, computeProbeClarityScore, pool };
