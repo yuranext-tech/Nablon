@@ -80,6 +80,26 @@ main().catch((err) => {
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));  function launchWithRetry() {
+    bot.launch().catch((err) => {
+      console.error('bot.launch() failed:', err.message, '— retry in 15s');
+      setTimeout(launchWithRetry, 15000);
+    });
+  }
+  launchWithRetry();
+  console.log('Bot launch attempted (long polling).');
+
+  cron.schedule('*/5 * * * *', () => {
+    dailyCronTick().catch((err) => console.error('dailyCronTick error:', err));
+  });
+}
+
+main().catch((err) => {
+  console.error('Fatal startup error:', err);
+  process.exit(1);
+});
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));        res.writeHead(500, { 'Content-Type': 'text/plain' });
         res.end('error: ' + err.message);
       }
