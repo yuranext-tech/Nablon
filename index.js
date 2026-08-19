@@ -58,6 +58,52 @@ async function main() {
 
   // launch() раньше падал необработанной ошибкой и убивал весь процесс при
   // любом 409 — из-за этого один конфликт приводил к бесконечному циклу
+  // перезапусков. Теперь ошибка логируется и попытка повторяется через 15с,
+  // а не роняет health-check сервер и не оставляет бота молчащим навсегда.
+  function launchWithRetry() {
+    bot.launch().catch((err) => {
+      console.error('bot.launch() failed:', err.message, '— retry in 15s');
+      setTimeout(launchWithRetry, 15000);
+    });
+  }
+  launchWithRetry();
+  console.log('Bot launch attempted (long polling).');
+
+  cron.schedule('*/5 * * * *', () => {
+    dailyCronTick().catch((err) => console.error('dailyCronTick error:', err));
+  });
+}
+
+main().catch((err) => {
+  console.error('Fatal startup error:', err);
+  process.exit(1);
+});
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('error: ' + err.message);
+      }
+      return;
+    }
+
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok');
+  })
+  .listen(PORT, () => console.log(`Health-check server on port ${PORT}`));
+
+async function main() {
+  await runMigration(); // применяет schema.sql — локальный SQL-клиент не нужен
+
+  // На случай, если на боте случайно включён webhook (конфликтует с long polling
+  // и даёт ровно 409 Conflict) — явно снимаем его и сбрасываем зависшую очередь.
+  try {
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+  } catch (err) {
+    console.error('deleteWebhook failed (non-fatal):', err.message);
+  }
+
+  // launch() раньше падал необработанной ошибкой и убивал весь процесс при
+  // любом 409 — из-за этого один конфликт приводил к бесконечному циклу
   // перезапусков. Теперь ошибка логируется, а не роняет health-check сервер.
   bot.launch().catch((err) => {
     console.error('bot.launch() failed:', err.message);
