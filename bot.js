@@ -34,12 +34,24 @@ bot.start(async (ctx) => {
      RETURNING *`,
     [telegramId]
   );
-  await ctx.reply(WELCOME_TEXT);
 
-  // Cold start: не ждать до утреннего слота — первый зонд сразу после регистрации.
-  // Для уже существующего пользователя (ON CONFLICT сработал, rows пустой) не повторяем.
   if (rows.length > 0) {
+    // Новый пользователь
+    await ctx.reply(WELCOME_TEXT);
     await sendProbe(rows[0]);
+    return;
+  }
+
+  // Уже существующий пользователь нажал /start повторно — сообщаем реальное
+  // состояние, а не молча оставляем его гадать, что происходит.
+  const { rows: existing } = await pool.query('SELECT * FROM users WHERE telegram_id=$1', [telegramId]);
+  const user = existing[0];
+  if (user.state === 'ACTIVE') {
+    await ctx.reply('Ты уже зарегистрирован. Сейчас жду ответ на сегодняшний вопрос — пришли число.');
+  } else if (user.state === 'WAITING_OUTCOME') {
+    await ctx.reply('Ты уже зарегистрирован. Сейчас жду вечерний ответ по сегодняшнему циклу — пришли число.');
+  } else {
+    await ctx.reply('Ты уже зарегистрирован. Следующий вопрос придёт в своё время.');
   }
 });
 
@@ -187,8 +199,11 @@ async function sendEveningCheckin(user) {
 
 // Устойчивый парсер: ищет отдельное число 1-10 как самостоятельный токен,
 // а не любые цифры подряд ("7-8" больше не даст 7, "10/10" не даст 1010).
+// Строгий парсер: ответ должен ЦЕЛИКОМ быть числом 1-10 (с необязательной
+// пунктуацией по краям: "7", "7.", "8!"), а не содержать число где-то внутри
+// произвольного текста. Иначе "что от 1 до 10?" ошибочно парсится как "1".
 function parseScoreAnswer(text) {
-  const match = text.match(/\b([1-9]|10)\b/);
+  const match = text.trim().match(/^([1-9]|10)[.!?]?$/);
   return match ? parseInt(match[1], 10) : null;
 }
 
