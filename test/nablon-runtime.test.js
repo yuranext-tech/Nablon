@@ -45,7 +45,7 @@ assert.ok(bot.includes("ep.status==='WAITING_NEW_DECISION'"));
 assert.ok(bot.includes("if (!sc.intervention?.question)"));
 
 const schema = fs.readFileSync('schema.sql','utf8');
-for (const table of ['nablon_sessions','nablon_episodes','nablon_events','nablon_routing_telemetry','nablon_processed_updates']) {
+for (const table of ['nablon_sessions','nablon_episodes','nablon_events','nablon_routing_telemetry','nablon_processed_updates','nablon_outbox']) {
   assert.ok(schema.includes('CREATE TABLE IF NOT EXISTS ' + table));
 }
 console.log('Nablon runtime smoke tests: OK');
@@ -55,3 +55,13 @@ assert.ok(sessionNumberSchema.includes('session_number INT NOT NULL'));
 assert.ok(sessionNumberSchema.includes('idx_nablon_session_number'));
 assert.ok(bot.includes('FOR UPDATE'));
 assert.ok(bot.includes('MAX(session_number)'));
+
+assert.ok(schema.includes("status TEXT NOT NULL CHECK (status IN ('PENDING','SENDING','SENT'))"));
+assert.ok(schema.includes('logical_key TEXT NOT NULL UNIQUE'));
+assert.ok(schema.includes('idx_nablon_outbox_pending'));
+assert.ok(bot.includes('FOR UPDATE SKIP LOCKED'));
+assert.ok(bot.includes('ON CONFLICT (logical_key) DO NOTHING'));
+assert.ok(bot.includes("status='SENDING'"));
+assert.ok(bot.includes('async function flushOutbox'));
+assert.ok(bot.includes('enqueueOutbox(client'));
+assert.ok(bot.includes('flushOutbox(1)'));
