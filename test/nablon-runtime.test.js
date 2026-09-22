@@ -25,6 +25,7 @@ for (const key of ['purpose','why','example','life']) {
 }
 
 const bot = fs.readFileSync('bot.js','utf8');
+assert.ok(bot.includes('NABLON_SESSION_STARTED'));
 assert.ok(bot.includes('NABLON_EPISODE_STARTED'));
 assert.ok(bot.includes('NABLON_USER_RESPONDED'));
 assert.ok(bot.includes('NABLON_PROMPT_SHOWN'));
