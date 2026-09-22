@@ -65,3 +65,10 @@ assert.ok(bot.includes("status='SENDING'"));
 assert.ok(bot.includes('async function flushOutbox'));
 assert.ok(bot.includes('enqueueOutbox(client'));
 assert.ok(bot.includes('flushOutbox(1)'));
+
+assert.ok(schema.includes('current_episode_id TEXT'));
+assert.ok(schema.includes('fk_nablon_current_episode'));
+assert.ok(bot.includes('WHERE id=$1 AND session_id=$2'));
+assert.ok(bot.includes('Compatibility/recovery path for sessions created before current_episode_id'));
+assert.ok(bot.includes('canonical prompt outbox item'));
+assert.ok(!bot.includes("const resumeText = 'Продолжим с того места, где остановились."));
