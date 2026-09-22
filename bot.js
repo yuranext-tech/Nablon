@@ -299,6 +299,19 @@ async function resumeActiveSessions() {
       )).rows[0] || null;
     }
 
+    if (ep && ep.status === 'COMPLETED') {
+      // Crash recovery: the previous episode committed, but the next episode
+      // was not started before the process stopped. Advance the session.
+      const nextIndex = Number(s.current_episode_index) + 1;
+      if (nextIndex >= SCENES.length) {
+        try { await finish({id:s.user_id,telegram_id:s.telegram_id},s); }
+        catch(e){ console.error('resumeActiveSessions completed->finish:',s.id,e.message); }
+      } else {
+        await startEpisode({id:s.user_id,telegram_id:s.telegram_id},s,nextIndex);
+      }
+      continue;
+    }
+
     if (!ep) {
       // Compatibility/recovery path for sessions created before current_episode_id.
       const fallback=(await pool.query(
@@ -369,4 +382,4 @@ async function resumeActiveSessions() {
 }
 
 async function dailyCronTick() {}
-module.exports={bot,dailyCronTick,pool,route,resumeActiveSessions};
+module.exports={bot,dailyCronTick,pool,route,resumeActiveSessions,flushOutbox};
