@@ -135,9 +135,20 @@ bot.on('text',async ctx=>{
     try {
       await client.query('BEGIN');
       await event(client,u,s,ep,'NABLON_USER_RESPONDED',1,{raw_text:text});
-      await client.query('INSERT INTO nablon_routing_telemetry (user_id,session_id,episode_id,routing_class,confidence,classifier_version) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,s.id,ep.id,rt.c,rt.confidence,ROUTER_VERSION]);
+      await client.query('INSERT INTO nablon_routing_telemetry (user_id,session_id,episode_id,routing_class,confidence,classifier_version) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,s.id,ep.id,rt.c,rt.confidence]);
+
+      if (!sc.intervention?.question) {
+        await client.query("UPDATE nablon_episodes SET turn_index=1,status='COMPLETED',completed_at=NOW(),routing_class=$1,classifier_version=$2 WHERE id=$3",[rt.c,ROUTER_VERSION,ep.id]);
+        await event(client,u,s,ep,'NABLON_EPISODE_COMPLETED',1,{transfer:true});
+        await client.query('COMMIT');
+        const next=s.current_episode_index+1;
+        const fresh=(await pool.query('SELECT * FROM nablon_sessions WHERE id=$1',[s.id])).rows[0];
+        if(next>=SCENES.length) await finish(u,fresh); else await startEpisode(u,fresh,next);
+        return;
+      }
+
       await client.query("UPDATE nablon_episodes SET turn_index=2,status='WAITING_NEW_DECISION',support_stage='DIRECTED',routing_class=$1,classifier_version=$2 WHERE id=$3",[rt.c,ROUTER_VERSION,ep.id]);
-      const q=sc.intervention?.question || 'Что теперь думаешь и что сделаешь?';
+      const q=sc.intervention.question;
       await event(client,u,s,ep,'NABLON_PROMPT_SHOWN',2,{prompt:q});
       await client.query('COMMIT');
       await ctx.reply(q);
