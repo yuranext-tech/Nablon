@@ -35,7 +35,7 @@ assert.ok(bot.includes('NABLON_SESSION_RESUMED'));
 assert.ok(bot.includes('async function resumeActiveSessions()'));
 assert.ok(bot.includes("status IN ('WAITING_RESPONSE','WAITING_NEW_DECISION','INCOMPLETE')"));
 assert.ok(bot.includes('process can die after the previous episode commits'));
-assert.ok(bot.includes('const nextIndex = last ? Number(s.current_episode_index) + 1 : 0'));
+assert.ok(bot.includes('const nextIndex = last ? Number(s.current_episode_index)+1 : 0') || bot.includes('const nextIndex = last ? Number(s.current_episode_index) + 1 : 0'));
 assert.ok(bot.includes("status='WAITING_RESPONSE', completed_at=NULL"));
 assert.ok(!bot.includes('drop_pending_updates'));
 assert.ok(!bot.includes('ASK_BUTTON'));
@@ -62,7 +62,7 @@ assert.ok(schema.includes('idx_nablon_outbox_pending'));
 assert.ok(bot.includes('FOR UPDATE SKIP LOCKED'));
 assert.ok(bot.includes('ON CONFLICT (logical_key) DO NOTHING'));
 assert.ok(bot.includes("status='SENDING'"));
-assert.ok(bot.includes('async function flushOutbox'));
+assert.ok(bot.includes('async function flushOutbox'));\nassert.ok(bot.includes('module.exports={bot,dailyCronTick,pool,route,resumeActiveSessions,flushOutbox}'));
 assert.ok(bot.includes('enqueueOutbox(client'));
 assert.ok(bot.includes('flushOutbox(1)'));
 
@@ -70,5 +70,6 @@ assert.ok(schema.includes('current_episode_id TEXT'));
 assert.ok(schema.includes('fk_nablon_current_episode'));
 assert.ok(bot.includes('WHERE id=$1 AND session_id=$2'));
 assert.ok(bot.includes('Compatibility/recovery path for sessions created before current_episode_id'));
-assert.ok(bot.includes('canonical prompt outbox item'));
+assert.ok(bot.includes('canonical prompt outbox item'));\nassert.ok(bot.includes("ep && ep.status === 'COMPLETED'"));\nassert.ok(bot.includes('completed->finish'));
+
 assert.ok(!bot.includes("const resumeText = 'Продолжим с того места, где остановились."));
