@@ -79,17 +79,30 @@ async function startEpisode(user,session,index) {
     await event(client,user,session,ep,'NABLON_PROMPT_SHOWN',0,{prompt:s.prompt});
     await client.query('UPDATE nablon_sessions SET current_episode_index=$1 WHERE id=$2',[index,session.id]);
     await client.query('COMMIT');
-    await bot.telegram.sendMessage(user.telegram_id,s.prompt);
+    try {
+      await bot.telegram.sendMessage(user.telegram_id,s.prompt);
+    } catch (sendError) {
+      await pool.query("UPDATE nablon_episodes SET status='INCOMPLETE',completed_at=NOW() WHERE id=$1 AND status='WAITING_RESPONSE'",[ep.id]);
+      console.error('startEpisode send:',sendError);
+    }
   } catch(e) { await client.query('ROLLBACK'); console.error('startEpisode:',e); }
   finally { client.release(); }
 }
 async function finish(user,session) {
   const r=await pool.query("SELECT id FROM nablon_episodes WHERE session_id=$1 ORDER BY started_at DESC LIMIT 1",[session.id]);
   await pool.query("UPDATE nablon_sessions SET status='COMPLETED',completed_at=NOW() WHERE id=$1",[session.id]);
-  if(r.rows[0]) await pool.query(
-    "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_SET_COMPLETED',$4,$5)",
-    [user.id,session.id,r.rows[0].id,4,JSON.stringify({training_id:session.training_id,episodes:SCENES.length})]
-  );
+  if(r.rows[0]) {
+    const lastEpisode=(await pool.query('SELECT turn_index FROM nablon_episodes WHERE id=$1',[r.rows[0].id])).rows[0];
+    const turn=lastEpisode?.turn_index ?? 0;
+    await pool.query(
+      "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_SET_COMPLETED',$4,$5)",
+      [user.id,session.id,r.rows[0].id,turn,JSON.stringify({training_id:session.training_id,episodes:SCENES.length})]
+    );
+    await pool.query(
+      "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_SESSION_ENDED',$4,$5)",
+      [user.id,session.id,r.rows[0].id,turn,JSON.stringify({reason:'completed'})]
+    );
+  }
   await bot.telegram.sendMessage(user.telegram_id,'Сет завершён.\n\nМожно остановиться здесь или пройти ещё один.',RESTART_BUTTON);
 }
 
@@ -140,7 +153,6 @@ bot.on('text',async ctx=>{
       await client.query('BEGIN');
       const locked=(await client.query('SELECT * FROM nablon_episodes WHERE id=$1 FOR UPDATE',[ep.id])).rows[0];
       if(!locked || locked.status!=='WAITING_RESPONSE') { await client.query('ROLLBACK'); return; }
-      const rt=await route(text,sc.prompt);
       await event(client,u,s,locked,'NABLON_USER_RESPONDED',1,{raw_text:text});
       await client.query('INSERT INTO nablon_routing_telemetry (user_id,session_id,episode_id,routing_class,confidence,classifier_version) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,s.id,locked.id,rt.c,rt.confidence]);
 
