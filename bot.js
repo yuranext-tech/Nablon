@@ -75,6 +75,9 @@ async function startEpisode(user,session,index) {
   try {
     await client.query('BEGIN');
     await client.query("INSERT INTO nablon_episodes (id,session_id,scene_id,turn_index,status,support_stage) VALUES ($1,$2,$3,0,'WAITING_RESPONSE','NONE')",[ep.id,session.id,s.id]);
+    if (index === 0) {
+      await event(client,user,session,ep,'NABLON_SESSION_STARTED',0,{training_id:session.training_id,mode:session.mode});
+    }
     await event(client,user,session,ep,'NABLON_EPISODE_STARTED',0,{scene_id:s.id,structure_id:s.structureId,context:s.context,mode:s.mode});
     await event(client,user,session,ep,'NABLON_PROMPT_SHOWN',0,{prompt:s.prompt});
     await client.query('UPDATE nablon_sessions SET current_episode_index=$1 WHERE id=$2',[index,session.id]);
