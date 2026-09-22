@@ -150,7 +150,7 @@ async function startEpisode(user,session,index) {
     await event(client,user,session,ep,'NABLON_EPISODE_STARTED',0,{scene_id:s.id,structure_id:s.structureId,context:s.context,mode:s.mode});
     await event(client,user,session,ep,'NABLON_PROMPT_SHOWN',0,{prompt:s.prompt});
     await enqueueOutbox(client,{user,session,episode:ep,logicalKey:`session:${session.id}:episode:${ep.id}:prompt:0`,text:s.prompt});
-    await client.query('UPDATE nablon_sessions SET current_episode_index=$1 WHERE id=$2',[index,session.id]);
+    await client.query('UPDATE nablon_sessions SET current_episode_index=$1,current_episode_id=$2 WHERE id=$3',[index,ep.id,session.id]);
     await client.query('COMMIT');
     await flushOutbox(1);
   } catch(e) {
@@ -164,7 +164,7 @@ async function finish(user,session) {
   try {
     await client.query('BEGIN');
     const last=(await client.query("SELECT id,turn_index FROM nablon_episodes WHERE session_id=$1 ORDER BY started_at DESC LIMIT 1",[session.id])).rows[0];
-    await client.query("UPDATE nablon_sessions SET status='COMPLETED',completed_at=NOW() WHERE id=$1 AND status='ACTIVE'",[session.id]);
+    await client.query("UPDATE nablon_sessions SET status='COMPLETED',completed_at=NOW(),current_episode_id=NULL WHERE id=$1 AND status='ACTIVE'",[session.id]);
     if(last){
       await event(client,user,session,last,'NABLON_SET_COMPLETED',last.turn_index,{training_id:session.training_id,episodes:SCENES.length});
       await event(client,user,session,last,'NABLON_SESSION_ENDED',last.turn_index,{reason:'completed'});
@@ -216,7 +216,8 @@ bot.action('ask',async ctx=>{
   await ctx.answerCbQuery();
   const u=await userFor(ctx.from.id), s=await activeSession(u.id);
   if(!s) return ctx.reply('Сейчас нет активного сета.');
-  const r=await pool.query("SELECT * FROM nablon_episodes WHERE session_id=$1 ORDER BY started_at DESC LIMIT 1",[s.id]);
+  if(!s.current_episode_id) return;
+  const r=await pool.query("SELECT * FROM nablon_episodes WHERE id=$1 AND session_id=$2",[s.current_episode_id,s.id]);
   const ep=r.rows[0]; if(!ep) return;
   await pool.query('UPDATE nablon_episodes SET question_requested=true WHERE id=$1',[ep.id]);
   await pool.query("INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_QUESTION_REQUESTED',$4,'{}')",[u.id,s.id,ep.id,ep.turn_index]);
@@ -229,7 +230,8 @@ bot.action(/^q:(purpose|why|example|life)$/,async ctx=>{
 
 bot.on('text',async ctx=>{
   const u=await userFor(ctx.from.id), s=await activeSession(u.id); if(!s) return;
-  const r=await pool.query("SELECT * FROM nablon_episodes WHERE session_id=$1 ORDER BY started_at DESC LIMIT 1",[s.id]);
+  if(!s.current_episode_id) return;
+  const r=await pool.query("SELECT * FROM nablon_episodes WHERE id=$1 AND session_id=$2",[s.current_episode_id,s.id]);
   const ep=r.rows[0]; if(!ep) return;
   const sc=scene(ep); if(!sc) return;
   const text=ctx.message.text;
