@@ -60,3 +60,6 @@ CREATE INDEX IF NOT EXISTS idx_nablon_episodes_session ON nablon_episodes(sessio
 CREATE INDEX IF NOT EXISTS idx_nablon_events_session ON nablon_events(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_nablon_events_user ON nablon_events(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_nablon_routing_episode ON nablon_routing_telemetry(episode_id, created_at);
+
+-- Only one live training session may exist per user.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_one_active_session ON nablon_sessions(user_id) WHERE status='ACTIVE';
