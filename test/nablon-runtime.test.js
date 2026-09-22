@@ -47,3 +47,9 @@ for (const table of ['nablon_sessions','nablon_episodes','nablon_events','nablon
   assert.ok(schema.includes('CREATE TABLE IF NOT EXISTS ' + table));
 }
 console.log('Nablon runtime smoke tests: OK');
+
+const sessionNumberSchema = fs.readFileSync('schema.sql','utf8');
+assert.ok(sessionNumberSchema.includes('session_number INT NOT NULL'));
+assert.ok(sessionNumberSchema.includes('idx_nablon_session_number'));
+assert.ok(bot.includes('FOR UPDATE'));
+assert.ok(bot.includes('MAX(session_number)'));
