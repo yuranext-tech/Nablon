@@ -34,6 +34,8 @@ assert.ok(bot.includes('NABLON_SET_COMPLETED'));
 assert.ok(bot.includes('NABLON_SESSION_RESUMED'));
 assert.ok(bot.includes('async function resumeActiveSessions()'));
 assert.ok(bot.includes("status IN ('WAITING_RESPONSE','WAITING_NEW_DECISION','INCOMPLETE')"));
+assert.ok(bot.includes('process can die after the previous episode commits'));
+assert.ok(bot.includes('const nextIndex = last ? Number(s.current_episode_index) + 1 : 0'));
 assert.ok(bot.includes("status='WAITING_RESPONSE', completed_at=NULL"));
 assert.ok(!bot.includes('drop_pending_updates'));
 assert.ok(!bot.includes('ASK_BUTTON'));
