@@ -223,7 +223,7 @@ async function resumeActiveSessions() {
 
   for (const s of r.rows) {
     const epResult = await pool.query(
-      "SELECT * FROM nablon_episodes WHERE session_id=$1 AND status IN ('WAITING_RESPONSE','WAITING_NEW_DECISION') ORDER BY started_at DESC LIMIT 1",
+      "SELECT * FROM nablon_episodes WHERE session_id=$1 AND status IN ('WAITING_RESPONSE','WAITING_NEW_DECISION','INCOMPLETE') ORDER BY started_at DESC LIMIT 1",
       [s.id]
     );
     const ep = epResult.rows[0];
@@ -242,6 +242,11 @@ async function resumeActiveSessions() {
       continue;
     }
 
+    if (ep.status === 'INCOMPLETE') {
+      const repaired = await pool.query("UPDATE nablon_episodes SET status='WAITING_RESPONSE', completed_at=NULL WHERE id=$1 AND status='INCOMPLETE' RETURNING *", [ep.id]);
+      if (!repaired.rows.length) continue;
+      ep.status = 'WAITING_RESPONSE';
+    }
     const resumeText = 'Продолжим с того места, где остановились.\n\n' + prompt;
     try {
       await bot.telegram.sendMessage(s.telegram_id, resumeText);
