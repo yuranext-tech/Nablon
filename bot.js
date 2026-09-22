@@ -257,8 +257,9 @@ bot.on('text',async ctx=>{
       await client.query("UPDATE nablon_episodes SET turn_index=2,status='WAITING_NEW_DECISION',support_stage='DIRECTED',routing_class=$1,classifier_version=$2 WHERE id=$3",[rt.c,ROUTER_VERSION,locked.id]);
       const q=sc.intervention.question;
       await event(client,u,s,locked,'NABLON_PROMPT_SHOWN',2,{prompt:q});
+      await enqueueOutbox(client,{user:u,session:s,episode:locked,logicalKey:`session:${s.id}:episode:${locked.id}:prompt:2`,text:q});
       await client.query('COMMIT');
-      await ctx.reply(q);
+      await flushOutbox(1);
     } catch(e) { await client.query('ROLLBACK'); console.error('first response:',e); }
     finally { client.release(); }
     return;
@@ -331,17 +332,24 @@ async function resumeActiveSessions() {
     }
     const resumeText = 'Продолжим с того места, где остановились.\n\n' + prompt;
     try {
-      await bot.telegram.sendMessage(s.telegram_id, resumeText);
-      await pool.query(
-        "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_SESSION_RESUMED',$4,$5)",
-        [s.user_id,s.id,ep.id,ep.turn_index,JSON.stringify({status:ep.status,scene_id:ep.scene_id})]
-      );
-      await pool.query(
-        "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_PROMPT_SHOWN',$4,$5)",
-        [s.user_id,s.id,ep.id,ep.turn_index,JSON.stringify({prompt:resumeText,resumed:true})]
-      );
+      const client=await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_SESSION_RESUMED',$4,$5)",
+          [s.user_id,s.id,ep.id,ep.turn_index,JSON.stringify({status:ep.status,scene_id:ep.scene_id})]
+        );
+        await client.query(
+          "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_PROMPT_SHOWN',$4,$5)",
+          [s.user_id,s.id,ep.id,ep.turn_index,JSON.stringify({prompt:resumeText,resumed:true})]
+        );
+        await enqueueOutbox(client,{user:{id:s.user_id,telegram_id:s.telegram_id},session:s,episode:ep,logicalKey:`session:${s.id}:episode:${ep.id}:resume`,text:resumeText});
+        await client.query('COMMIT');
+      } catch(e){ await client.query('ROLLBACK'); throw e; }
+      finally{ client.release(); }
+      await flushOutbox(1);
     } catch (e) {
-      console.error('resumeActiveSessions send:', s.id, e.message);
+      console.error('resumeActiveSessions outbox:', s.id, e.message);
     }
   }
 }
