@@ -148,6 +148,7 @@ bot.on('text',async ctx=>{
   const text=ctx.message.text;
 
   if(ep.status==='WAITING_RESPONSE') {
+    const rt=await route(text,sc.prompt);
     const client=await pool.connect();
     try {
       await client.query('BEGIN');
