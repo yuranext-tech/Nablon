@@ -98,7 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_nablon_routing_episode ON nablon_routing_telemetr
 -- Only one live training session may exist per user.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_one_active_session ON nablon_sessions(user_id) WHERE status='ACTIVE';
 
-DO $
+DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname='fk_nablon_current_episode'
@@ -107,7 +107,7 @@ BEGIN
       ADD CONSTRAINT fk_nablon_current_episode
       FOREIGN KEY (current_episode_id) REFERENCES nablon_episodes(id);
   END IF;
-END $;
+END $$;
 
 UPDATE nablon_sessions s
 SET current_episode_id = x.id
