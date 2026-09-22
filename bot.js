@@ -85,46 +85,95 @@ async function route(text, prompt) {
 }
 function scene(ep) { return SCENES.find(s=>s.id===ep.scene_id); }
 
+async function enqueueOutbox(client, {user, session, episode=null, logicalKey, text, replyMarkup=null}) {
+  await client.query(
+    `INSERT INTO nablon_outbox
+      (user_id,session_id,episode_id,logical_key,chat_id,text,reply_markup,status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'PENDING')
+     ON CONFLICT (logical_key) DO NOTHING`,
+    [user.id,session.id,episode?.id || null,logicalKey,user.telegram_id,text,replyMarkup ? JSON.stringify(replyMarkup) : null]
+  );
+}
+
+async function deliverOutbox() {
+  const client=await pool.connect();
+  let row=null;
+  try {
+    await client.query('BEGIN');
+    const r=await client.query(
+      `SELECT * FROM nablon_outbox
+       WHERE (status='PENDING' AND (next_attempt_at IS NULL OR next_attempt_at<=NOW()))
+          OR (status='SENDING' AND claimed_at < NOW() - INTERVAL '5 minutes')
+       ORDER BY created_at
+       FOR UPDATE SKIP LOCKED LIMIT 1`
+    );
+    row=r.rows[0];
+    if(!row){ await client.query('COMMIT'); return false; }
+    await client.query(
+      `UPDATE nablon_outbox SET status='SENDING',claimed_at=NOW(),attempts=attempts+1 WHERE id=$1`,
+      [row.id]
+    );
+    await client.query('COMMIT');
+  } catch(e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally { client.release(); }
+
+  try {
+    const options=row.reply_markup ? {reply_markup:row.reply_markup} : undefined;
+    await bot.telegram.sendMessage(row.chat_id,row.text,options);
+    await pool.query("UPDATE nablon_outbox SET status='SENT',sent_at=NOW(),claimed_at=NULL,last_error=NULL WHERE id=$1 AND status='SENDING'",[row.id]);
+  } catch(e) {
+    const delaySeconds=Math.min(300,Math.max(15,15*Math.pow(2,Math.min(row.attempts-1,4))));
+    await pool.query(
+      "UPDATE nablon_outbox SET status='PENDING',claimed_at=NULL,next_attempt_at=NOW()+($2 * INTERVAL '1 second'),last_error=$3 WHERE id=$1 AND status='SENDING'",
+      [row.id,delaySeconds,String(e.message||e).slice(0,1000)]
+    );
+    console.error('outbox send:',row.logical_key,e.message);
+  }
+  return true;
+}
+
+async function flushOutbox(limit=20) {
+  for(let i=0;i<limit;i++){ if(!await deliverOutbox()) break; }
+}
+
 async function startEpisode(user,session,index) {
   const s=SCENES[index];
-  if (!s) return finish(user,session);
+  if(!s) return finish(user,session);
   const ep={id:id('ep'),session_id:session.id,scene_id:s.id,turn_index:0};
   const client=await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query("INSERT INTO nablon_episodes (id,session_id,scene_id,turn_index,status,support_stage) VALUES ($1,$2,$3,0,'WAITING_RESPONSE','NONE')",[ep.id,session.id,s.id]);
-    if (index === 0) {
-      await event(client,user,session,ep,'NABLON_SESSION_STARTED',0,{training_id:session.training_id,mode:session.mode});
-    }
+    if(index===0) await event(client,user,session,ep,'NABLON_SESSION_STARTED',0,{training_id:session.training_id,mode:session.mode});
     await event(client,user,session,ep,'NABLON_EPISODE_STARTED',0,{scene_id:s.id,structure_id:s.structureId,context:s.context,mode:s.mode});
     await event(client,user,session,ep,'NABLON_PROMPT_SHOWN',0,{prompt:s.prompt});
+    await enqueueOutbox(client,{user,session,episode:ep,logicalKey:`session:${session.id}:episode:${ep.id}:prompt:0`,text:s.prompt});
     await client.query('UPDATE nablon_sessions SET current_episode_index=$1 WHERE id=$2',[index,session.id]);
     await client.query('COMMIT');
-    try {
-      await bot.telegram.sendMessage(user.telegram_id,s.prompt);
-    } catch (sendError) {
-      await pool.query("UPDATE nablon_episodes SET status='INCOMPLETE',completed_at=NOW() WHERE id=$1 AND status='WAITING_RESPONSE'",[ep.id]);
-      console.error('startEpisode send:',sendError);
-    }
-  } catch(e) { await client.query('ROLLBACK'); console.error('startEpisode:',e); }
-  finally { client.release(); }
+    await flushOutbox(1);
+  } catch(e) {
+    await client.query('ROLLBACK');
+    console.error('startEpisode:',e);
+  } finally { client.release(); }
 }
+
 async function finish(user,session) {
-  const r=await pool.query("SELECT id FROM nablon_episodes WHERE session_id=$1 ORDER BY started_at DESC LIMIT 1",[session.id]);
-  await pool.query("UPDATE nablon_sessions SET status='COMPLETED',completed_at=NOW() WHERE id=$1",[session.id]);
-  if(r.rows[0]) {
-    const lastEpisode=(await pool.query('SELECT turn_index FROM nablon_episodes WHERE id=$1',[r.rows[0].id])).rows[0];
-    const turn=lastEpisode?.turn_index ?? 0;
-    await pool.query(
-      "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_SET_COMPLETED',$4,$5)",
-      [user.id,session.id,r.rows[0].id,turn,JSON.stringify({training_id:session.training_id,episodes:SCENES.length})]
-    );
-    await pool.query(
-      "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_SESSION_ENDED',$4,$5)",
-      [user.id,session.id,r.rows[0].id,turn,JSON.stringify({reason:'completed'})]
-    );
-  }
-  await bot.telegram.sendMessage(user.telegram_id,'Сет завершён.\n\nМожно остановиться здесь или пройти ещё один.',RESTART_BUTTON);
+  const client=await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const last=(await client.query("SELECT id,turn_index FROM nablon_episodes WHERE session_id=$1 ORDER BY started_at DESC LIMIT 1",[session.id])).rows[0];
+    await client.query("UPDATE nablon_sessions SET status='COMPLETED',completed_at=NOW() WHERE id=$1 AND status='ACTIVE'",[session.id]);
+    if(last){
+      await event(client,user,session,last,'NABLON_SET_COMPLETED',last.turn_index,{training_id:session.training_id,episodes:SCENES.length});
+      await event(client,user,session,last,'NABLON_SESSION_ENDED',last.turn_index,{reason:'completed'});
+      await enqueueOutbox(client,{user,session,episode:last,logicalKey:`session:${session.id}:completion`,text:'Сет завершён.\\n\\nМожно остановиться здесь или пройти ещё один.',replyMarkup:RESTART_BUTTON});
+    }
+    await client.query('COMMIT');
+  } catch(e){ await client.query('ROLLBACK'); throw e; }
+  finally{ client.release(); }
+  await flushOutbox(1);
 }
 
 bot.start(async ctx=>{
