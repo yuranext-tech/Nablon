@@ -137,13 +137,30 @@ bot.action('start_training',async ctx=>{
   const u=await userFor(ctx.from.id);
   if(await activeSession(u.id)) return ctx.reply('У тебя уже есть незавершённый сет.');
   const sId=id('ses');
+  let s;
+  const client=await pool.connect();
   try {
-    await pool.query("INSERT INTO nablon_sessions (id,user_id,mode,training_id,current_episode_index,status) VALUES ($1,$2,'live','condition_change_test_v01',0,'ACTIVE')",[sId,u.id]);
+    await client.query('BEGIN');
+    // Serialize session creation per user so two concurrent button deliveries
+    // cannot receive the same session_number.
+    const lockedUser=(await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[u.id])).rows[0];
+    if (!lockedUser) { await client.query('ROLLBACK'); return; }
+    const active=(await client.query("SELECT id FROM nablon_sessions WHERE user_id=$1 AND status='ACTIVE' LIMIT 1",[u.id])).rows[0];
+    if (active) { await client.query('ROLLBACK'); return ctx.reply('У тебя уже есть незавершённый сет.'); }
+    const n=(await client.query('SELECT COALESCE(MAX(session_number),0)+1 AS session_number FROM nablon_sessions WHERE user_id=$1',[u.id])).rows[0].session_number;
+    await client.query(
+      "INSERT INTO nablon_sessions (id,user_id,session_number,mode,training_id,current_episode_index,status) VALUES ($1,$2,$3,'live','condition_change_test_v01',0,'ACTIVE')",
+      [sId,u.id,n]
+    );
+    s=(await client.query('SELECT * FROM nablon_sessions WHERE id=$1',[sId])).rows[0];
+    await client.query('COMMIT');
   } catch (e) {
+    await client.query('ROLLBACK');
     if (e.code === '23505') return ctx.reply('У тебя уже есть незавершённый сет.');
     throw e;
+  } finally {
+    client.release();
   }
-  const s=(await pool.query('SELECT * FROM nablon_sessions WHERE id=$1',[sId])).rows[0];
   await startEpisode(u,s,0);
 });
 bot.action('ask',async ctx=>{
