@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS nablon_sessions (
   id TEXT PRIMARY KEY,
   user_id INT NOT NULL REFERENCES users(id),
+  session_number INT NOT NULL,
   mode TEXT NOT NULL CHECK (mode IN ('demo','live')),
   training_id TEXT NOT NULL,
   current_episode_index INT NOT NULL DEFAULT 0,
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS nablon_routing_telemetry (
 
 CREATE INDEX IF NOT EXISTS idx_nablon_processed_updates_time ON nablon_processed_updates(processed_at);
 CREATE INDEX IF NOT EXISTS idx_nablon_sessions_user ON nablon_sessions(user_id, started_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_session_number ON nablon_sessions(user_id, session_number);
 CREATE INDEX IF NOT EXISTS idx_nablon_episodes_session ON nablon_episodes(session_id, turn_index);
 CREATE INDEX IF NOT EXISTS idx_nablon_events_session ON nablon_events(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_nablon_events_user ON nablon_events(user_id, created_at);
@@ -69,3 +71,14 @@ CREATE INDEX IF NOT EXISTS idx_nablon_routing_episode ON nablon_routing_telemetr
 
 -- Only one live training session may exist per user.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_one_active_session ON nablon_sessions(user_id) WHERE status='ACTIVE';
+
+-- Additive migration for databases created by earlier v0.1 revisions.
+ALTER TABLE nablon_sessions ADD COLUMN IF NOT EXISTS session_number INT;
+UPDATE nablon_sessions s SET session_number = x.session_number
+FROM (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY started_at, id) AS session_number
+  FROM nablon_sessions
+) x
+WHERE s.id=x.id AND s.session_number IS NULL;
+ALTER TABLE nablon_sessions ALTER COLUMN session_number SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_session_number ON nablon_sessions(user_id, session_number);
