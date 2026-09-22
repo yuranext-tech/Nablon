@@ -216,5 +216,48 @@ bot.on('text',async ctx=>{
   }
 });
 
+async function resumeActiveSessions() {
+  const r = await pool.query(
+    "SELECT s.*, u.telegram_id FROM nablon_sessions s JOIN users u ON u.id=s.user_id WHERE s.status='ACTIVE' ORDER BY s.started_at ASC"
+  );
+
+  for (const s of r.rows) {
+    const epResult = await pool.query(
+      "SELECT * FROM nablon_episodes WHERE session_id=$1 AND status IN ('WAITING_RESPONSE','WAITING_NEW_DECISION') ORDER BY started_at DESC LIMIT 1",
+      [s.id]
+    );
+    const ep = epResult.rows[0];
+    if (!ep) {
+      console.error('resumeActiveSessions: active session has no waiting episode', s.id);
+      continue;
+    }
+
+    const promptResult = await pool.query(
+      "SELECT payload FROM nablon_events WHERE episode_id=$1 AND event_name='NABLON_PROMPT_SHOWN' ORDER BY created_at DESC LIMIT 1",
+      [ep.id]
+    );
+    const prompt = promptResult.rows[0]?.payload?.prompt;
+    if (!prompt) {
+      console.error('resumeActiveSessions: waiting episode has no prompt', ep.id);
+      continue;
+    }
+
+    const resumeText = 'Продолжим с того места, где остановились.\n\n' + prompt;
+    try {
+      await bot.telegram.sendMessage(s.telegram_id, resumeText);
+      await pool.query(
+        "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_SESSION_RESUMED',$4,$5)",
+        [s.user_id,s.id,ep.id,ep.turn_index,JSON.stringify({status:ep.status,scene_id:ep.scene_id})]
+      );
+      await pool.query(
+        "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_PROMPT_SHOWN',$4,$5)",
+        [s.user_id,s.id,ep.id,ep.turn_index,JSON.stringify({prompt:resumeText,resumed:true})]
+      );
+    } catch (e) {
+      console.error('resumeActiveSessions send:', s.id, e.message);
+    }
+  }
+}
+
 async function dailyCronTick() {}
-module.exports={bot,dailyCronTick,pool,route};
+module.exports={bot,dailyCronTick,pool,route,resumeActiveSessions};
