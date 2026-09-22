@@ -20,6 +20,24 @@ const RESTART_BUTTON = Markup.inlineKeyboard([[Markup.button.callback('Прой�
 
 function id(prefix) { return prefix + '_' + crypto.randomUUID(); }
 
+// Telegram retries delivery of updates. Deduplicate at the runtime boundary so
+// the same update cannot start two sessions, answer twice, or advance an episode twice.
+bot.use(async (ctx, next) => {
+  const updateId = ctx.update?.update_id;
+  if (updateId == null) return next();
+  try {
+    const r = await pool.query(
+      'INSERT INTO nablon_processed_updates (update_id) VALUES ($1) ON CONFLICT DO NOTHING RETURNING update_id',
+      [updateId]
+    );
+    if (!r.rows.length) return;
+    return next();
+  } catch (e) {
+    console.error('update deduplication failed:', e.message);
+    throw e;
+  }
+});
+
 async function userFor(tgId) {
   const r = await pool.query(
     'INSERT INTO users (telegram_id) VALUES ($1) ON CONFLICT (telegram_id) DO UPDATE SET last_active_at=NOW() RETURNING *',
