@@ -89,7 +89,7 @@ async function finish(user,session) {
   await pool.query("UPDATE nablon_sessions SET status='COMPLETED',completed_at=NOW() WHERE id=$1",[session.id]);
   if(r.rows[0]) await pool.query(
     "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_SET_COMPLETED',$4,$5)",
-    [user.id,session.id,r.rows[0].id,SCENES.length*4,JSON.stringify({training_id:session.training_id,episodes:SCENES.length})]
+    [user.id,session.id,r.rows[0].id,4,JSON.stringify({training_id:session.training_id,episodes:SCENES.length})]
   );
   await bot.telegram.sendMessage(user.telegram_id,'Сет завершён.\n\nМожно остановиться здесь или пройти ещё один.',RESTART_BUTTON);
 }
@@ -104,7 +104,12 @@ bot.action('start_training',async ctx=>{
   const u=await userFor(ctx.from.id);
   if(await activeSession(u.id)) return ctx.reply('У тебя уже есть незавершённый сет.');
   const sId=id('ses');
-  await pool.query("INSERT INTO nablon_sessions (id,user_id,mode,training_id,current_episode_index,status) VALUES ($1,$2,'live','condition_change_test_v01',0,'ACTIVE')",[sId,u.id]);
+  try {
+    await pool.query("INSERT INTO nablon_sessions (id,user_id,mode,training_id,current_episode_index,status) VALUES ($1,$2,'live','condition_change_test_v01',0,'ACTIVE')",[sId,u.id]);
+  } catch (e) {
+    if (e.code === '23505') return ctx.reply('У тебя уже есть незавершённый сет.');
+    throw e;
+  }
   const s=(await pool.query('SELECT * FROM nablon_sessions WHERE id=$1',[sId])).rows[0];
   await startEpisode(u,s,0);
 });
@@ -131,15 +136,18 @@ bot.on('text',async ctx=>{
   const text=ctx.message.text;
 
   if(ep.status==='WAITING_RESPONSE') {
-    const rt=await route(text,sc.prompt), client=await pool.connect();
+    const client=await pool.connect();
     try {
       await client.query('BEGIN');
-      await event(client,u,s,ep,'NABLON_USER_RESPONDED',1,{raw_text:text});
-      await client.query('INSERT INTO nablon_routing_telemetry (user_id,session_id,episode_id,routing_class,confidence,classifier_version) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,s.id,ep.id,rt.c,rt.confidence]);
+      const locked=(await client.query('SELECT * FROM nablon_episodes WHERE id=$1 FOR UPDATE',[ep.id])).rows[0];
+      if(!locked || locked.status!=='WAITING_RESPONSE') { await client.query('ROLLBACK'); return; }
+      const rt=await route(text,sc.prompt);
+      await event(client,u,s,locked,'NABLON_USER_RESPONDED',1,{raw_text:text});
+      await client.query('INSERT INTO nablon_routing_telemetry (user_id,session_id,episode_id,routing_class,confidence,classifier_version) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,s.id,locked.id,rt.c,rt.confidence]);
 
       if (!sc.intervention?.question) {
-        await client.query("UPDATE nablon_episodes SET turn_index=1,status='COMPLETED',completed_at=NOW(),routing_class=$1,classifier_version=$2 WHERE id=$3",[rt.c,ROUTER_VERSION,ep.id]);
-        await event(client,u,s,ep,'NABLON_EPISODE_COMPLETED',1,{transfer:true});
+        await client.query("UPDATE nablon_episodes SET turn_index=1,status='COMPLETED',completed_at=NOW(),routing_class=$1,classifier_version=$2 WHERE id=$3",[rt.c,ROUTER_VERSION,locked.id]);
+        await event(client,u,s,locked,'NABLON_EPISODE_COMPLETED',1,{transfer:true});
         await client.query('COMMIT');
         const next=s.current_episode_index+1;
         const fresh=(await pool.query('SELECT * FROM nablon_sessions WHERE id=$1',[s.id])).rows[0];
@@ -147,9 +155,9 @@ bot.on('text',async ctx=>{
         return;
       }
 
-      await client.query("UPDATE nablon_episodes SET turn_index=2,status='WAITING_NEW_DECISION',support_stage='DIRECTED',routing_class=$1,classifier_version=$2 WHERE id=$3",[rt.c,ROUTER_VERSION,ep.id]);
+      await client.query("UPDATE nablon_episodes SET turn_index=2,status='WAITING_NEW_DECISION',support_stage='DIRECTED',routing_class=$1,classifier_version=$2 WHERE id=$3",[rt.c,ROUTER_VERSION,locked.id]);
       const q=sc.intervention.question;
-      await event(client,u,s,ep,'NABLON_PROMPT_SHOWN',2,{prompt:q});
+      await event(client,u,s,locked,'NABLON_PROMPT_SHOWN',2,{prompt:q});
       await client.query('COMMIT');
       await ctx.reply(q);
     } catch(e) { await client.query('ROLLBACK'); console.error('first response:',e); }
@@ -161,9 +169,11 @@ bot.on('text',async ctx=>{
     const client=await pool.connect();
     try {
       await client.query('BEGIN');
-      await event(client,u,s,ep,'NABLON_USER_RESPONDED',3,{raw_text:text});
-      await client.query("UPDATE nablon_episodes SET turn_index=3,status='COMPLETED',completed_at=NOW() WHERE id=$1",[ep.id]);
-      await event(client,u,s,ep,'NABLON_EPISODE_COMPLETED',3,{});
+      const locked=(await client.query('SELECT * FROM nablon_episodes WHERE id=$1 FOR UPDATE',[ep.id])).rows[0];
+      if(!locked || locked.status!=='WAITING_NEW_DECISION') { await client.query('ROLLBACK'); return; }
+      await event(client,u,s,locked,'NABLON_USER_RESPONDED',3,{raw_text:text});
+      await client.query("UPDATE nablon_episodes SET turn_index=3,status='COMPLETED',completed_at=NOW() WHERE id=$1",[locked.id]);
+      await event(client,u,s,locked,'NABLON_EPISODE_COMPLETED',3,{});
       await client.query('COMMIT');
       const next=s.current_episode_index+1;
       const fresh=(await pool.query('SELECT * FROM nablon_sessions WHERE id=$1',[s.id])).rows[0];
