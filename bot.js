@@ -10,7 +10,6 @@ const ROUTER_VERSION = 'mvp-router-v0.1';
 
 const START_TEXT = 'Nablon\nТренажёр здравого смысла.\n\nКороткие ситуации из обычной жизни.\nНапиши, что думаешь и что сделаешь — как в жизни.\n\nОбычно это занимает несколько минут.';
 const START_BUTTON = Markup.inlineKeyboard([[Markup.button.callback('Начать', 'start_training')]]);
-const ASK_BUTTON = Markup.inlineKeyboard([[Markup.button.callback('Задать вопрос', 'ask')]]);
 const QUESTION_BUTTONS = Markup.inlineKeyboard([
   [Markup.button.callback('Зачем это?', 'q:purpose')],
   [Markup.button.callback('Почему ты это спрашиваешь?', 'q:why')],
@@ -80,7 +79,7 @@ async function startEpisode(user,session,index) {
     await event(client,user,session,ep,'NABLON_PROMPT_SHOWN',0,{prompt:s.prompt});
     await client.query('UPDATE nablon_sessions SET current_episode_index=$1 WHERE id=$2',[index,session.id]);
     await client.query('COMMIT');
-    await bot.telegram.sendMessage(user.telegram_id,s.prompt,ASK_BUTTON);
+    await bot.telegram.sendMessage(user.telegram_id,s.prompt);
   } catch(e) { await client.query('ROLLBACK'); console.error('startEpisode:',e); }
   finally { client.release(); }
 }
