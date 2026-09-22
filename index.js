@@ -25,14 +25,16 @@ http
       }
       try {
         const users = await pool.query(
-          'SELECT id, telegram_id, state, last_probe_code, preferred_slot_hour, last_active_at FROM users ORDER BY id DESC'
+          'SELECT id, telegram_id, last_active_at FROM users ORDER BY id DESC LIMIT 100'
         );
-        const observations = await pool.query(
-          `SELECT id, user_id, probe_code, event_type, event_phase, response_payload, structured_fields, is_valid, invalid_reason, created_at
-           FROM observations ORDER BY created_at DESC LIMIT 20`
+        const sessions = await pool.query(
+          'SELECT id, user_id, training_id, mode, current_episode_index, status, started_at, completed_at FROM nablon_sessions ORDER BY started_at DESC LIMIT 50'
+        );
+        const events = await pool.query(
+          'SELECT id, user_id, session_id, episode_id, event_name, turn_index, payload, created_at FROM nablon_events ORDER BY created_at DESC LIMIT 100'
         );
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ users: users.rows, observations: observations.rows }, null, 2));
+        res.end(JSON.stringify({ users: users.rows, sessions: sessions.rows, events: events.rows }, null, 2));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'text/plain' });
         res.end('error: ' + err.message);
