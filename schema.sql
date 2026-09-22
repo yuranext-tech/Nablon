@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS nablon_events (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS nablon_processed_updates (
+  update_id BIGINT PRIMARY KEY,
+  processed_at TIMESTAMP DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS nablon_routing_telemetry (
   id BIGSERIAL PRIMARY KEY,
   user_id INT NOT NULL REFERENCES users(id),
@@ -55,6 +60,7 @@ CREATE TABLE IF NOT EXISTS nablon_routing_telemetry (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+CREATE INDEX IF NOT EXISTS idx_nablon_processed_updates_time ON nablon_processed_updates(processed_at);
 CREATE INDEX IF NOT EXISTS idx_nablon_sessions_user ON nablon_sessions(user_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_nablon_episodes_session ON nablon_episodes(session_id, turn_index);
 CREATE INDEX IF NOT EXISTS idx_nablon_events_session ON nablon_events(session_id, created_at);
