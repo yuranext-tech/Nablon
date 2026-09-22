@@ -243,9 +243,25 @@ async function resumeActiveSessions() {
       "SELECT * FROM nablon_episodes WHERE session_id=$1 AND status IN ('WAITING_RESPONSE','WAITING_NEW_DECISION','INCOMPLETE') ORDER BY started_at DESC LIMIT 1",
       [s.id]
     );
-    const ep = epResult.rows[0];
+    let ep = epResult.rows[0];
     if (!ep) {
-      console.error('resumeActiveSessions: active session has no waiting episode', s.id);
+      // A process can die after the previous episode commits but before the
+      // next episode is created. Reconstruct the next step from durable state.
+      const lastResult = await pool.query(
+        "SELECT * FROM nablon_episodes WHERE session_id=$1 ORDER BY turn_index DESC, started_at DESC LIMIT 1",
+        [s.id]
+      );
+      const last = lastResult.rows[0];
+      const nextIndex = last ? Number(s.current_episode_index) + 1 : 0;
+      if (nextIndex >= SCENES.length) {
+        try { await finish({ id: s.user_id, telegram_id: s.telegram_id }, s); } catch (e) { console.error('resumeActiveSessions finish:', s.id, e.message); }
+      } else {
+        await startEpisode(
+          { id: s.user_id, telegram_id: s.telegram_id },
+          s,
+          nextIndex
+        );
+      }
       continue;
     }
 
