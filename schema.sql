@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS nablon_episodes (
   completed_at TIMESTAMP
 );
 
+ALTER TABLE nablon_sessions ADD COLUMN IF NOT EXISTS current_episode_id TEXT;
+
 CREATE TABLE IF NOT EXISTS nablon_events (
   id BIGSERIAL PRIMARY KEY,
   user_id INT NOT NULL REFERENCES users(id),
@@ -95,6 +97,19 @@ CREATE INDEX IF NOT EXISTS idx_nablon_routing_episode ON nablon_routing_telemetr
 
 -- Only one live training session may exist per user.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_one_active_session ON nablon_sessions(user_id) WHERE status='ACTIVE';
+
+ALTER TABLE nablon_sessions
+  ADD CONSTRAINT fk_nablon_current_episode
+  FOREIGN KEY (current_episode_id) REFERENCES nablon_episodes(id);
+
+UPDATE nablon_sessions s
+SET current_episode_id = x.id
+FROM (
+  SELECT DISTINCT ON (session_id) id, session_id
+  FROM nablon_episodes
+  ORDER BY session_id, started_at DESC, id DESC
+) x
+WHERE s.id=x.session_id AND s.current_episode_id IS NULL AND s.status='ACTIVE';
 
 -- Additive migration for databases created by earlier v0.1 revisions.
 ALTER TABLE nablon_sessions ADD COLUMN IF NOT EXISTS session_number INT;
