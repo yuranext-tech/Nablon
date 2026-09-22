@@ -7,12 +7,13 @@ const sandbox = { module: { exports: {} }, exports: {} };
 vm.runInNewContext(probes, sandbox);
 const { SCENES, QUESTION_ANSWERS } = sandbox.module.exports;
 
-assert.strictEqual(SCENES.length, 4);
-assert.deepStrictEqual(SCENES.map(s => s.mode), ['TRAIN','TRAIN','TRANSFER','TRANSFER']);
-assert.ok(SCENES[0].intervention);
+assert.strictEqual(SCENES.length, 5);
+assert.deepStrictEqual(SCENES.map(s => s.mode), ['CONTROL','TRAIN','TRAIN','TRANSFER','TRANSFER']);
+assert.strictEqual(SCENES[0].intervention, undefined);
 assert.ok(SCENES[1].intervention);
-assert.strictEqual(SCENES[2].intervention, undefined);
+assert.ok(SCENES[2].intervention);
 assert.strictEqual(SCENES[3].intervention, undefined);
+assert.strictEqual(SCENES[4].intervention, undefined);
 assert.ok(SCENES.every(s => s.structureId === 'condition_change_test'));
 
 for (const s of SCENES) {
@@ -29,7 +30,7 @@ assert.ok(bot.includes('NABLON_USER_RESPONDED'));
 assert.ok(bot.includes('NABLON_PROMPT_SHOWN'));
 assert.ok(bot.includes('NABLON_EPISODE_COMPLETED'));
 assert.ok(bot.includes('NABLON_SET_COMPLETED'));
-assert.ok(bot.includes('NABLON_QUESTION_REQUESTED'));
+assert.ok(!bot.includes('ASK_BUTTON'));
 assert.ok(bot.includes('nablon_routing_telemetry'));
 assert.ok(bot.includes("ep.status==='WAITING_RESPONSE'"));
 assert.ok(bot.includes("ep.status==='WAITING_NEW_DECISION'"));
