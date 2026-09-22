@@ -1,21 +1,41 @@
 // Nablon MVP — explicit scenes; not generated at runtime.
+// First experimental set: one baseline, two directed TRAIN episodes, two TRANSFER episodes.
 const SCENES = [
   {
-    id: 'train_01', structureId: 'condition_change_test', context: 'INFORMATION', mode: 'TRAIN',
+    id: 'control_01',
+    structureId: 'condition_change_test',
+    context: 'INFORMATION',
+    mode: 'CONTROL',
+    prompt: 'Ты собираешься начать небольшой проект. Ты несколько дней откладываешь его.\n\nЧто ты думаешь и что сделаешь?',
+  },
+  {
+    id: 'train_01',
+    structureId: 'condition_change_test',
+    context: 'INFORMATION',
+    mode: 'TRAIN',
     prompt: 'Ты собираешься записать короткий ролик. Ты говоришь, что пока не начинаешь, потому что человек, который должен прислать тебе нужный материал, ещё не прислал его.\n\nЧто ты думаешь и что сделаешь?',
     intervention: { question: 'Представь, что нужный материал уже лежит перед тобой. Ты начинаешь записывать ролик? Что изменится в твоём решении?' },
   },
   {
-    id: 'train_02', structureId: 'condition_change_test', context: 'SERVICE', mode: 'TRAIN',
-    prompt: 'Ты хочешь заказать вещь, но откладываешь заказ. Ты объясняешь себе это тем, что сначала нужно дождаться скидки.\n\nЧто ты думаешь и что сделаешь?',
-    intervention: { question: 'Представь, что скидка уже появилась прямо сейчас. Ты заказываешь? Что изменилось в твоём решении?' },
+    id: 'train_02',
+    structureId: 'condition_change_test',
+    context: 'SERVICE',
+    mode: 'TRAIN',
+    prompt: 'Ты хочешь записаться на мероприятие, но откладываешь решение, потому что не знаешь, придёт ли туда твой знакомый.\n\nЧто ты думаешь и что сделаешь?',
+    intervention: { question: 'Представь, что ты уже точно знаешь: твой знакомый туда не придёт. Ты всё равно решаешься записаться? Что изменилось в твоём решении?' },
   },
   {
-    id: 'transfer_01', structureId: 'condition_change_test', context: 'SOCIAL', mode: 'TRANSFER',
+    id: 'transfer_01',
+    structureId: 'condition_change_test',
+    context: 'SOCIAL',
+    mode: 'TRANSFER',
     prompt: 'Ты собирался написать человеку после встречи, но уже несколько дней не пишешь. Ты объясняешь это тем, что не знаешь, как лучше начать сообщение.\n\nЧто ты думаешь и что сделаешь?',
   },
   {
-    id: 'transfer_02', structureId: 'condition_change_test', context: 'HOUSEHOLD', mode: 'TRANSFER',
+    id: 'transfer_02',
+    structureId: 'condition_change_test',
+    context: 'HOUSEHOLD',
+    mode: 'TRANSFER',
     prompt: 'Ты давно хочешь переставить одну вещь дома, но каждый раз откладываешь. Ты говоришь себе, что сначала нужно освободить для неё место.\n\nЧто ты думаешь и что сделаешь?',
   },
 ];
