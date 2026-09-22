@@ -31,6 +31,10 @@ assert.ok(bot.includes('NABLON_USER_RESPONDED'));
 assert.ok(bot.includes('NABLON_PROMPT_SHOWN'));
 assert.ok(bot.includes('NABLON_EPISODE_COMPLETED'));
 assert.ok(bot.includes('NABLON_SET_COMPLETED'));
+assert.ok(bot.includes('NABLON_SESSION_RESUMED'));
+assert.ok(bot.includes('async function resumeActiveSessions()'));
+assert.ok(bot.includes("status IN ('WAITING_RESPONSE','WAITING_NEW_DECISION')"));
+assert.ok(!bot.includes('drop_pending_updates'));
 assert.ok(!bot.includes('ASK_BUTTON'));
 assert.ok(bot.includes('nablon_routing_telemetry'));
 assert.ok(bot.includes("ep.status==='WAITING_RESPONSE'"));
@@ -38,7 +42,7 @@ assert.ok(bot.includes("ep.status==='WAITING_NEW_DECISION'"));
 assert.ok(bot.includes("if (!sc.intervention?.question)"));
 
 const schema = fs.readFileSync('schema.sql','utf8');
-for (const table of ['nablon_sessions','nablon_episodes','nablon_events','nablon_routing_telemetry']) {
+for (const table of ['nablon_sessions','nablon_episodes','nablon_events','nablon_routing_telemetry','nablon_processed_updates']) {
   assert.ok(schema.includes('CREATE TABLE IF NOT EXISTS ' + table));
 }
 console.log('Nablon runtime smoke tests: OK');
