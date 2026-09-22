@@ -1,338 +1,166 @@
-// bot.js — минимальный state machine + push logic, встроены прямо в код.
-// Состояния: NEW -> ACTIVE -> WAITING_OUTCOME -> READY_FOR_NEXT -> INACTIVE -> DORMANT
-// Никакой отдельной "спецификации" не требуется — это она и есть.
-
-const { Telegraf } = require('telegraf');
+// Nablon MVP runtime v0.1
+const crypto = require('crypto');
+const { Telegraf, Markup } = require('telegraf');
 const { Pool } = require('pg');
-const { PROBES } = require('./probes');
+const { SCENES, QUESTION_ANSWERS } = require('./probes');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const ROUTER_VERSION = 'mvp-router-v0.1';
 
-// Приветствие после /start — не привязано к конкретному зонду, отправляется один раз при регистрации.
-const WELCOME_TEXT =
-  'Привет. Это когнитивный тренер.\n\n' +
-  'Он помогает лучше замечать, как ты думаешь и принимаешь решения — через ' +
-  'короткие ежедневные задачи, которые занимают около трёх минут.\n\n' +
-  'Первые дни он почти ничего о тебе не знает, поэтому не делает выводов. ' +
-  'Сначала он собирает наблюдения. Когда их станет достаточно, начнёт показывать то, что заметил.\n\n' +
-  'Когда тебе удобно получать вечерний вопрос? По умолчанию — в 20:00, но это можно изменить в любой момент.';
+const START_TEXT = 'Nablon\nТренажёр здравого смысла.\n\nКороткие ситуации из обычной жизни.\nНапиши, что думаешь и что сделаешь — как в жизни.\n\nОбычно это занимает несколько минут.';
+const START_BUTTON = Markup.inlineKeyboard([[Markup.button.callback('Начать', 'start_training')]]);
+const ASK_BUTTON = Markup.inlineKeyboard([[Markup.button.callback('Задать вопрос', 'ask')]]);
+const QUESTION_BUTTONS = Markup.inlineKeyboard([
+  [Markup.button.callback('Зачем это?', 'q:purpose')],
+  [Markup.button.callback('Почему ты это спрашиваешь?', 'q:why')],
+  [Markup.button.callback('Покажи другой пример', 'q:example')],
+  [Markup.button.callback('Как это применить в жизни?', 'q:life')],
+]);
+const RESTART_BUTTON = Markup.inlineKeyboard([[Markup.button.callback('Пройти ещё раз', 'start_training')]]);
 
-// Одноразовое объяснение при первом знакомстве с ТИПОМ ЗОНДА (не с продуктом в целом,
-// это отдельно от WELCOME_TEXT). Правило: объяснение относится к типу зонда,
-// а не к конкретному сообщению.
-const ONBOARDING_COPY = {
-  forecast_conversation:
-    'Сегодня — первая часть: прогноз. Вечером — вторая: как вышло на деле.',
-};
+function id(prefix) { return prefix + '_' + crypto.randomUUID(); }
 
-bot.start(async (ctx) => {
-  const telegramId = ctx.from.id;
-  const { rows } = await pool.query(
-    `INSERT INTO users (telegram_id) VALUES ($1)
-     ON CONFLICT (telegram_id) DO NOTHING
-     RETURNING *`,
-    [telegramId]
+async function userFor(tgId) {
+  const r = await pool.query(
+    'INSERT INTO users (telegram_id) VALUES ($1) ON CONFLICT (telegram_id) DO UPDATE SET last_active_at=NOW() RETURNING *',
+    [tgId]
   );
+  return r.rows[0];
+}
+async function activeSession(userId) {
+  const r = await pool.query("SELECT * FROM nablon_sessions WHERE user_id=$1 AND status='ACTIVE' ORDER BY started_at DESC LIMIT 1", [userId]);
+  return r.rows[0] || null;
+}
+async function event(client, user, session, episode, name, turn, payload={}) {
+  await client.query(
+    'INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,$4,$5,$6)',
+    [user.id,session.id,episode.id,name,turn,JSON.stringify(payload)]
+  );
+}
+function routeLocal(text) {
+  const action = /\b(сделаю|сделать|напишу|позвоню|пойду|закажу|подожду|спрошу|проверю|начну|отложу|отменю|решу|буду|не буду|сначала|потом)\b/i.test(text);
+  const explain = /\b(потому что|так как|из-за|думаю|мне кажется|причина|поскольку|скорее всего|видимо)\b/i.test(text);
+  if (action) return { c:'ACTION', confidence: explain ? .55 : .72 };
+  if (explain) return { c:'EXPLAIN', confidence:.72 };
+  return { c:'UNCLEAR', confidence:.4 };
+}
+async function route(text, prompt) {
+  if (!process.env.OPENAI_API_KEY) return routeLocal(text);
+  try {
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method:'POST',
+      headers:{'Content-Type':'application/json',Authorization:'Bearer '+process.env.OPENAI_API_KEY},
+      body:JSON.stringify({
+        model:process.env.OPENAI_MODEL || 'gpt-4o-mini', temperature:0,
+        response_format:{type:'json_object'},
+        messages:[
+          {role:'system',content:'Return JSON only: {"class":"ACTION"|"EXPLAIN"|"UNCLEAR","confidence":0..1}. Classify only current-dialogue routing. ACTION contains a decision/action; EXPLAIN is mainly an explanation; UNCLEAR otherwise. Do not judge correctness, intelligence, motives or personality.'},
+          {role:'user',content:'Scene:\n'+prompt+'\n\nResponse:\n'+text}
+        ]
+      })
+    });
+    if (!r.ok) return routeLocal(text);
+    const j=JSON.parse((await r.json()).choices?.[0]?.message?.content || '{}');
+    if (!['ACTION','EXPLAIN','UNCLEAR'].includes(j.class)) return routeLocal(text);
+    return {c:j.class,confidence:Number.isFinite(Number(j.confidence))?Number(j.confidence):.5};
+  } catch(e) { console.error('router fallback:',e.message); return routeLocal(text); }
+}
+function scene(ep) { return SCENES.find(s=>s.id===ep.scene_id); }
 
-  if (rows.length > 0) {
-    // Новый пользователь
-    await ctx.reply(WELCOME_TEXT);
-    await sendProbe(rows[0]);
+async function startEpisode(user,session,index) {
+  const s=SCENES[index];
+  if (!s) return finish(user,session);
+  const ep={id:id('ep'),session_id:session.id,scene_id:s.id,turn_index:0};
+  const client=await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("INSERT INTO nablon_episodes (id,session_id,scene_id,turn_index,status,support_stage) VALUES ($1,$2,$3,0,'WAITING_RESPONSE','NONE')",[ep.id,session.id,s.id]);
+    await event(client,user,session,ep,'NABLON_EPISODE_STARTED',0,{scene_id:s.id,structure_id:s.structureId,context:s.context,mode:s.mode});
+    await event(client,user,session,ep,'NABLON_PROMPT_SHOWN',0,{prompt:s.prompt});
+    await client.query('UPDATE nablon_sessions SET current_episode_index=$1 WHERE id=$2',[index,session.id]);
+    await client.query('COMMIT');
+    await bot.telegram.sendMessage(user.telegram_id,s.prompt,ASK_BUTTON);
+  } catch(e) { await client.query('ROLLBACK'); console.error('startEpisode:',e); }
+  finally { client.release(); }
+}
+async function finish(user,session) {
+  const r=await pool.query("SELECT id FROM nablon_episodes WHERE session_id=$1 ORDER BY started_at DESC LIMIT 1",[session.id]);
+  await pool.query("UPDATE nablon_sessions SET status='COMPLETED',completed_at=NOW() WHERE id=$1",[session.id]);
+  if(r.rows[0]) await pool.query(
+    "INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_SET_COMPLETED',$4,$5)",
+    [user.id,session.id,r.rows[0].id,SCENES.length*4,JSON.stringify({training_id:session.training_id,episodes:SCENES.length})]
+  );
+  await bot.telegram.sendMessage(user.telegram_id,'Сет завершён.\n\nМожно остановиться здесь или пройти ещё один.',RESTART_BUTTON);
+}
+
+bot.start(async ctx=>{
+  const u=await userFor(ctx.from.id);
+  if(await activeSession(u.id)) return ctx.reply('У тебя уже есть незавершённый сет.');
+  return ctx.reply(START_TEXT,START_BUTTON);
+});
+bot.action('start_training',async ctx=>{
+  await ctx.answerCbQuery();
+  const u=await userFor(ctx.from.id);
+  if(await activeSession(u.id)) return ctx.reply('У тебя уже есть незавершённый сет.');
+  const sId=id('ses');
+  await pool.query("INSERT INTO nablon_sessions (id,user_id,mode,training_id,current_episode_index,status) VALUES ($1,$2,'live','condition_change_test_v01',0,'ACTIVE')",[sId,u.id]);
+  const s=(await pool.query('SELECT * FROM nablon_sessions WHERE id=$1',[sId])).rows[0];
+  await startEpisode(u,s,0);
+});
+bot.action('ask',async ctx=>{
+  await ctx.answerCbQuery();
+  const u=await userFor(ctx.from.id), s=await activeSession(u.id);
+  if(!s) return ctx.reply('Сейчас нет активного сета.');
+  const r=await pool.query("SELECT * FROM nablon_episodes WHERE session_id=$1 ORDER BY started_at DESC LIMIT 1",[s.id]);
+  const ep=r.rows[0]; if(!ep) return;
+  await pool.query('UPDATE nablon_episodes SET question_requested=true WHERE id=$1',[ep.id]);
+  await pool.query("INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,'NABLON_QUESTION_REQUESTED',$4,'{}')",[u.id,s.id,ep.id,ep.turn_index]);
+  await ctx.reply('Что именно хочешь узнать?',QUESTION_BUTTONS);
+});
+bot.action(/^q:(purpose|why|example|life)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  await ctx.reply(QUESTION_ANSWERS[ctx.match[1]]);
+});
+
+bot.on('text',async ctx=>{
+  const u=await userFor(ctx.from.id), s=await activeSession(u.id); if(!s) return;
+  const r=await pool.query("SELECT * FROM nablon_episodes WHERE session_id=$1 ORDER BY started_at DESC LIMIT 1",[s.id]);
+  const ep=r.rows[0]; if(!ep) return;
+  const sc=scene(ep); if(!sc) return;
+  const text=ctx.message.text;
+
+  if(ep.status==='WAITING_RESPONSE') {
+    const rt=await route(text,sc.prompt), client=await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await event(client,u,s,ep,'NABLON_USER_RESPONDED',1,{raw_text:text});
+      await client.query('INSERT INTO nablon_routing_telemetry (user_id,session_id,episode_id,routing_class,confidence,classifier_version) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,s.id,ep.id,rt.c,rt.confidence,ROUTER_VERSION]);
+      await client.query("UPDATE nablon_episodes SET turn_index=2,status='WAITING_NEW_DECISION',support_stage='DIRECTED',routing_class=$1,classifier_version=$2 WHERE id=$3",[rt.c,ROUTER_VERSION,ep.id]);
+      const q=sc.intervention?.question || 'Что теперь думаешь и что сделаешь?';
+      await event(client,u,s,ep,'NABLON_PROMPT_SHOWN',2,{prompt:q});
+      await client.query('COMMIT');
+      await ctx.reply(q);
+    } catch(e) { await client.query('ROLLBACK'); console.error('first response:',e); }
+    finally { client.release(); }
     return;
   }
 
-  // Уже существующий пользователь нажал /start повторно — сообщаем реальное
-  // состояние, а не молча оставляем его гадать, что происходит.
-  const { rows: existing } = await pool.query('SELECT * FROM users WHERE telegram_id=$1', [telegramId]);
-  const user = existing[0];
-  if (user.state === 'ACTIVE') {
-    await ctx.reply('Ты уже зарегистрирован. Сейчас жду ответ на сегодняшний вопрос — пришли число.');
-  } else if (user.state === 'WAITING_OUTCOME') {
-    await ctx.reply('Ты уже зарегистрирован. Сейчас жду вечерний ответ по сегодняшнему циклу — пришли число.');
-  } else {
-    await ctx.reply('Ты уже зарегистрирован. Следующий вопрос придёт в своё время.');
-  }
-});
-
-// probe_clarity_score — производная метрика, НЕ хранится как поле в probes.
-// Вычисляется по observations за окно (по умолчанию последние 20 наблюдений зонда).
-// score = 1 - validation_rejected_rate (без весов, без suspicious_response_rate —
-// тот требует ручного разбора, не автоматизирован преждевременно).
-async function computeProbeClarityScore(probeCode, windowSize = 20) {
-  const { rows } = await pool.query(
-    `SELECT event_type, is_valid FROM observations
-     WHERE probe_code = $1
-     ORDER BY created_at DESC LIMIT $2`,
-    [probeCode, windowSize]
-  );
-  if (rows.length === 0) return null;
-
-  const rejected = rows.filter((r) => r.event_type === 'VALIDATION_REJECTED').length;
-  const rejectedRate = rejected / rows.length;
-
-  return {
-    probe_code: probeCode,
-    sample_size: rows.length,
-    validation_rejected_rate: rejectedRate,
-    score: Math.max(0, 1 - rejectedRate),
-    note: 'suspicious_response_rate требует ручного разбора первых 10-20 пользователей, не автоматизировано',
-  };
-}
-
-// --- Push-правила: состояние -> что отправляем ---
-// Утренний зонд идёт в фиксированный час (про него отдельно не спрашивали при /start).
-// Вечерний вопрос — в preferred_slot_hour, который пользователь указал в WELCOME_TEXT.
-const MORNING_SLOT_HOUR = 10;
-
-function nextAction(state, consecutiveNoResponse, currentHour, preferredEveningHour) {
-  switch (state) {
-    case 'NEW':
-      return currentHour === MORNING_SLOT_HOUR ? { type: 'send_probe', phase: 'day' } : { type: 'noop' };
-    case 'READY_FOR_NEXT':
-      return currentHour === MORNING_SLOT_HOUR ? { type: 'send_probe', phase: 'day' } : { type: 'noop' };
-    case 'WAITING_OUTCOME':
-      return currentHour === preferredEveningHour ? { type: 'send_evening_checkin' } : { type: 'noop' };
-    case 'ACTIVE':
-      return { type: 'noop' }; // ждём ответа на уже отправленный зонд
-    case 'INACTIVE':
-      return currentHour === MORNING_SLOT_HOUR
-        ? consecutiveNoResponse >= 3
-          ? { type: 'noop' } // переход в DORMANT произойдёт отдельным cron'ом
-          : { type: 'soft_reminder' }
-        : { type: 'noop' };
-    case 'DORMANT':
-      return { type: 'noop' }; // weekly_ping обрабатывается отдельным недельным cron, не здесь
-    default:
-      return { type: 'noop' };
-  }
-}
-
-// --- Выбор зонда: MVP-правило — активен только forecast_conversation.
-// Ротация вернётся, когда в PROBES появится больше active:true после анализа данных.
-function pickNextProbe() {
-  const active = PROBES.filter((p) => p.active === true && p.payload_day);
-  return active[0]; // на сегодня — всегда один и тот же зонд
-}
-
-async function sendProbe(user) {
-  const probe = pickNextProbe();
-
-  // Идемпотентность: если сегодня этому пользователю уже отправляли зонд этого
-  // типа в дневной фазе — не слать повторно (cron гоняется каждые 5 минут).
-  const alreadySentToday = await pool.query(
-    `SELECT 1 FROM observations
-     WHERE user_id=$1 AND probe_code=$2 AND event_phase='day'
-       AND created_at::date = CURRENT_DATE
-     LIMIT 1`,
-    [user.id, probe.probe_code]
-  );
-  if (alreadySentToday.rowCount > 0) return;
-
-  // Первое знакомство пользователя с этим типом зонда — разовое объяснение.
-  const seenBefore = await pool.query(
-    `SELECT 1 FROM observations WHERE user_id=$1 AND probe_code=$2 LIMIT 1`,
-    [user.id, probe.probe_code]
-  );
-  if (seenBefore.rowCount === 0 && ONBOARDING_COPY[probe.probe_code]) {
-    await bot.telegram.sendMessage(user.telegram_id, ONBOARDING_COPY[probe.probe_code]);
-  }
-
-  await bot.telegram.sendMessage(user.telegram_id, probe.payload_day);
-
-  await pool.query(
-    `INSERT INTO observations (user_id, probe_id, probe_code, intervention_payload, event_type, event_phase)
-     VALUES ($1, (SELECT id FROM probes WHERE probe_code=$2), $2, $3, $4, 'day')`,
-    [user.id, probe.probe_code, JSON.stringify({ text: probe.payload_day }), probe.event_day]
-  );
-
-  await pool.query(
-    `UPDATE users SET state='ACTIVE', last_probe_code=$1, last_active_at=NOW() WHERE id=$2`,
-    [probe.probe_code, user.id]
-  );
-}
-
-async function sendEveningCheckin(user) {
-  // Источник истины — observations, а не user.last_probe_code (переживает рестарт).
-  // Ищем последнее наблюдение ЭТОГО пользователя с event_type=PREDICTION_MADE,
-  // для которого ещё нет соответствующего PREDICTION_RESOLVED.
-  const { rows } = await pool.query(
-    `SELECT o.probe_code FROM observations o
-     WHERE o.user_id = $1
-       AND o.event_type = 'PREDICTION_MADE'
-       AND o.event_phase = 'day'
-       AND NOT EXISTS (
-         SELECT 1 FROM observations r
-         WHERE r.user_id = o.user_id
-           AND r.probe_code = o.probe_code
-           AND r.event_phase = 'evening'
-           AND r.created_at > o.created_at
-       )
-     ORDER BY o.created_at DESC
-     LIMIT 1`,
-    [user.id]
-  );
-  if (rows.length === 0) return; // нечего резолвить — либо уже закрыто, либо не начиналось
-
-  const probeCode = rows[0].probe_code;
-  const probe = PROBES.find((p) => p.probe_code === probeCode);
-  if (!probe || !probe.payload_evening) return;
-
-  // Идемпотентность: не слать вечерний вопрос повторно в тот же день.
-  const alreadySentToday = await pool.query(
-    `SELECT 1 FROM observations
-     WHERE user_id=$1 AND probe_code=$2 AND event_phase='evening' AND event_type='PROMPT_SENT'
-       AND created_at::date = CURRENT_DATE
-     LIMIT 1`,
-    [user.id, probeCode]
-  );
-  if (alreadySentToday.rowCount > 0) return;
-
-  await bot.telegram.sendMessage(user.telegram_id, probe.payload_evening);
-
-  await pool.query(
-    `INSERT INTO observations (user_id, probe_id, probe_code, intervention_payload, event_type, event_phase)
-     VALUES ($1, (SELECT id FROM probes WHERE probe_code=$2), $2, $3, $4, 'evening')`,
-    [user.id, probeCode, JSON.stringify({ text: probe.payload_evening }), 'PROMPT_SENT']
-  );
-}
-
-// Устойчивый парсер: ищет отдельное число 1-10 как самостоятельный токен,
-// а не любые цифры подряд ("7-8" больше не даст 7, "10/10" не даст 1010).
-// Строгий парсер: ответ должен ЦЕЛИКОМ быть числом 1-10 (с необязательной
-// пунктуацией по краям: "7", "7.", "8!"), а не содержать число где-то внутри
-// произвольного текста. Иначе "что от 1 до 10?" ошибочно парсится как "1".
-function parseScoreAnswer(text) {
-  const match = text.trim().match(/^([1-9]|10)[.!?]?$/);
-  return match ? parseInt(match[1], 10) : null;
-}
-
-// --- Обработка ответа пользователя (только структурирование, без интерпретации) ---
-bot.on('text', async (ctx) => {
-  const telegramId = ctx.from.id;
-  const { rows } = await pool.query('SELECT * FROM users WHERE telegram_id=$1', [telegramId]);
-  const user = rows[0];
-  if (!user) return;
-
-  // Явная проверка: бот вообще сейчас ждёт ответ от этого пользователя?
-  // Если state не ACTIVE и не WAITING_OUTCOME — сообщение вне цикла, игнорируем
-  // (это и есть правило "принимается первый валидный ответ": после того как state
-  // сдвинулся дальше, повторные сообщения по старому зонду больше не обрабатываются).
-  if (user.state !== 'ACTIVE' && user.state !== 'WAITING_OUTCOME') return;
-
-  const probe = PROBES.find((p) => p.probe_code === user.last_probe_code);
-  if (!probe) return;
-
-  const isEveningPhase = user.state === 'WAITING_OUTCOME';
-  const num = parseScoreAnswer(ctx.message.text);
-  const isValid = num !== null;
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    if (!isEveningPhase) {
-      // --- ДНЕВНАЯ фаза: прогноз ---
-      await client.query(
-        `INSERT INTO observations (user_id, probe_id, probe_code, response_payload, structured_fields, event_type, event_phase, is_valid, invalid_reason)
-         VALUES ($1, (SELECT id FROM probes WHERE probe_code=$2), $2, $3, $4, $5, 'day', $6, $7)`,
-        [
-          user.id,
-          probe.probe_code,
-          JSON.stringify({ raw_text: ctx.message.text }),
-          isValid ? JSON.stringify({ predicted_value: num }) : null,
-          isValid ? 'VALIDATION_ACCEPTED' : 'VALIDATION_REJECTED',
-          isValid,
-          isValid ? null : 'could_not_parse_number',
-        ]
-      );
-
-      if (isValid) {
-        const newState = probe.payload_evening ? 'WAITING_OUTCOME' : 'READY_FOR_NEXT';
-        await client.query(`UPDATE users SET state=$1, last_active_at=NOW() WHERE id=$2`, [
-          newState,
-          user.id,
-        ]);
-      }
-
+  if(ep.status==='WAITING_NEW_DECISION') {
+    const client=await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await event(client,u,s,ep,'NABLON_USER_RESPONDED',3,{raw_text:text});
+      await client.query("UPDATE nablon_episodes SET turn_index=3,status='COMPLETED',completed_at=NOW() WHERE id=$1",[ep.id]);
+      await event(client,u,s,ep,'NABLON_EPISODE_COMPLETED',3,{});
       await client.query('COMMIT');
-
-      if (!isValid) {
-        await ctx.reply('Не понял ответ — можешь прислать просто числом от 1 до 10?');
-      }
-      return;
-    }
-
-    // --- ВЕЧЕРНЯЯ фаза: факт ---
-    // Достаём predicted_value из дневного наблюдения того же цикла (в той же транзакции)
-    const { rows: dayRows } = await client.query(
-      `SELECT structured_fields FROM observations
-       WHERE user_id=$1 AND probe_code=$2 AND event_phase='day' AND is_valid=true
-       ORDER BY created_at DESC LIMIT 1`,
-      [user.id, probe.probe_code]
-    );
-    const predictedValue = dayRows[0]?.structured_fields?.predicted_value;
-    const delta = isValid && typeof predictedValue === 'number' ? num - predictedValue : null;
-
-    await client.query(
-      `INSERT INTO observations (user_id, probe_id, probe_code, response_payload, structured_fields, event_type, event_phase, is_valid, invalid_reason, resolved_at)
-       VALUES ($1, (SELECT id FROM probes WHERE probe_code=$2), $2, $3, $4, $5, 'evening', $6, $7, $8)`,
-      [
-        user.id,
-        probe.probe_code,
-        JSON.stringify({ raw_text: ctx.message.text }),
-        isValid ? JSON.stringify({ actual_value: num, delta }) : null,
-        isValid ? 'PREDICTION_RESOLVED' : 'VALIDATION_REJECTED',
-        isValid,
-        isValid ? null : 'could_not_parse_number',
-        isValid ? new Date() : null,
-      ]
-    );
-
-    if (isValid) {
-      await client.query(`UPDATE users SET state='READY_FOR_NEXT', last_active_at=NOW() WHERE id=$1`, [
-        user.id,
-      ]);
-    }
-
-    await client.query('COMMIT');
-
-    if (!isValid) {
-      await ctx.reply('Не понял ответ — можешь прислать просто числом от 1 до 10?');
-      return;
-    }
-
-    // Layer A feedback — только факт, без интерпретации
-    if (predictedValue !== undefined) {
-      await ctx.reply(`Записал.\nПрогноз: ${predictedValue}\nФакт: ${num}`);
-    } else {
-      await ctx.reply('Записал.');
-    }
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('text handler error:', err);
-  } finally {
-    client.release();
+      const next=s.current_episode_index+1;
+      const fresh=(await pool.query('SELECT * FROM nablon_sessions WHERE id=$1',[s.id])).rows[0];
+      if(next>=SCENES.length) await finish(u,fresh); else await startEpisode(u,fresh,next);
+    } catch(e) { await client.query('ROLLBACK'); console.error('new decision:',e); }
+    finally { client.release(); }
   }
 });
 
-// --- Cron: гоняется раз в час, для каждого пользователя решает, пора ли действовать ---
-async function dailyCronTick() {
-  const currentHour = new Date().getHours(); // TODO: учитывать user.timezone, пока сервер = Europe/Kiev
-  const { rows: users } = await pool.query('SELECT * FROM users');
-  for (const user of users) {
-    const action = nextAction(
-      user.state,
-      user.consecutive_no_response,
-      currentHour,
-      user.preferred_slot_hour
-    );
-    if (action.type === 'send_probe') await sendProbe(user);
-    if (action.type === 'send_evening_checkin') await sendEveningCheckin(user);
-    if (action.type === 'soft_reminder') {
-      await bot.telegram.sendMessage(user.telegram_id, 'Не потерялся? Можем продолжить, когда будет удобно.');
-    }
-  }
-}
-
-module.exports = { bot, dailyCronTick, nextAction, pickNextProbe, sendProbe, sendEveningCheckin, computeProbeClarityScore, pool };
+async function dailyCronTick() {}
+module.exports={bot,dailyCronTick,pool,route};
