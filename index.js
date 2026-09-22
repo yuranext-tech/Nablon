@@ -3,7 +3,7 @@ const http = require('http');
 const url = require('url');
 const cron = require('node-cron');
 const { runMigration } = require('./migrate');
-const { bot, dailyCronTick, pool } = require('./bot');
+const { bot, dailyCronTick, pool, resumeActiveSessions } = require('./bot');
 
 // Render Web Service (free tier) требует слушать порт и засыпает без обращений
 // раз в ~15 минут. Health-check эндпоинт + внешний пинг (UptimeRobot) держат
@@ -53,19 +53,22 @@ async function main() {
   // На случай, если на боте случайно включён webhook (конфликтует с long polling
   // и даёт ровно 409 Conflict) — явно снимаем его и сбрасываем зависшую очередь.
   try {
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    await bot.telegram.deleteWebhook();
   } catch (err) {
     console.error('deleteWebhook failed (non-fatal):', err.message);
   }
 
-  // launch() раньше падал необработанной ошибкой и убивал весь процесс при
-  // любом 409 — из-за этого один конфликт приводил к бесконечному циклу
-  // перезапусков. Теперь ошибка логируется и попытка повторяется через 15с,
-  // а не роняет health-check сервер и не оставляет бота молчащим навсегда.
+  // Restore active sessions before polling starts, so a process restart does not
+  // strand a user on an episode that is already persisted as ACTIVE.
+  await resumeActiveSessions();
+
+  // launch() retries transient Telegram polling failures without killing the
+  // health-check server.
+  let launchRetryTimer = null;
   function launchWithRetry() {
     bot.launch().catch((err) => {
       console.error('bot.launch() failed:', err.message, '— retry in 15s');
-      setTimeout(launchWithRetry, 15000);
+      launchRetryTimer = setTimeout(launchWithRetry, 15000);
     });
   }
   launchWithRetry();
@@ -81,5 +84,13 @@ main().catch((err) => {
   process.exit(1);
 });
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (launchRetryTimer) clearTimeout(launchRetryTimer);
+  try { bot.stop(signal); } catch (e) { console.error('bot.stop failed:', e.message); }
+  try { await pool.end(); } catch (e) { console.error('pool.end failed:', e.message); }
+}
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
