@@ -3,7 +3,7 @@ const http = require('http');
 const url = require('url');
 const cron = require('node-cron');
 const { runMigration } = require('./migrate');
-const { bot, dailyCronTick, pool, resumeActiveSessions } = require('./bot');
+const { bot, dailyCronTick, pool, resumeActiveSessions, flushOutbox } = require('./bot');
 
 // Render Web Service (free tier) требует слушать порт и засыпает без обращений
 // раз в ~15 минут. Health-check эндпоинт + внешний пинг (UptimeRobot) держат
@@ -61,6 +61,7 @@ async function main() {
   // Restore active sessions before polling starts, so a process restart does not
   // strand a user on an episode that is already persisted as ACTIVE.
   await resumeActiveSessions();
+  await flushOutbox(20);
 
   // launch() retries transient Telegram polling failures without killing the
   // health-check server.
@@ -73,6 +74,10 @@ async function main() {
   }
   launchWithRetry();
   console.log('Bot launch attempted (long polling).');
+
+  cron.schedule('* * * * *', () => {
+    flushOutbox(20).catch((err) => console.error('outbox error:', err));
+  });
 
   cron.schedule('*/5 * * * *', () => {
     dailyCronTick().catch((err) => console.error('dailyCronTick error:', err));
