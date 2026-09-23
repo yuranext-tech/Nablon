@@ -3,10 +3,13 @@ const crypto = require('crypto');
 const { Telegraf, Markup } = require('telegraf');
 const { Pool } = require('pg');
 const { SCENES, QUESTION_ANSWERS } = require('./probes');
+const { recordL0Event } = require('./nablon/runtime/l0-events');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const ROUTER_VERSION = 'mvp-router-v0.1';
+const PROGRAM_VERSION = 'legacy-condition-change-v0.1';
+const RUNTIME_VERSION = 'nablon-runtime-v0.2';
 const ROUTER_TIMEOUT_MS = 8000;
 
 const START_TEXT = 'Nablon\nТренажёр здравого смысла.\n\nКороткие ситуации из обычной жизни.\nНапиши, что думаешь и что сделаешь — как в жизни.\n\nОбычно это занимает несколько минут.';
@@ -301,4 +304,4 @@ async function dailyCronTick() {
   }
 }
 
-module.exports={bot,pool,resumeActiveSessions,flushOutbox,dailyCronTick};
+module.exports={bot,pool,resumeActiveSessions,flushOutbox,dailyCronTick,recordL0Event};
