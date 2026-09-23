@@ -1,11 +1,11 @@
--- Nablon MVP v0.1 runtime schema
--- Raw L0 events are append-only facts. No behavioral interpretation is stored here.
+-- Nablon runtime schema
+-- L0 events are append-only facts. Behavioral interpretation belongs to Becoming.
 
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   telegram_id BIGINT UNIQUE NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW(),
-  last_active_at TIMESTAMP DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  last_active_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS nablon_sessions (
@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS nablon_sessions (
   training_id TEXT NOT NULL,
   current_episode_index INT NOT NULL DEFAULT 0,
   status TEXT NOT NULL CHECK (status IN ('NOT_STARTED','ACTIVE','COMPLETED','ABANDONED')),
-  started_at TIMESTAMP DEFAULT NOW(),
-  completed_at TIMESTAMP
+  started_at TIMESTAMPTZ DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS nablon_episodes (
@@ -30,8 +30,8 @@ CREATE TABLE IF NOT EXISTS nablon_episodes (
   question_requested BOOLEAN NOT NULL DEFAULT FALSE,
   routing_class TEXT CHECK (routing_class IN ('ACTION','EXPLAIN','UNCLEAR')),
   classifier_version TEXT,
-  started_at TIMESTAMP DEFAULT NOW(),
-  completed_at TIMESTAMP
+  started_at TIMESTAMPTZ DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
 );
 
 ALTER TABLE nablon_sessions ADD COLUMN IF NOT EXISTS current_episode_id TEXT;
@@ -40,16 +40,31 @@ CREATE TABLE IF NOT EXISTS nablon_events (
   id BIGSERIAL PRIMARY KEY,
   user_id INT NOT NULL REFERENCES users(id),
   session_id TEXT NOT NULL REFERENCES nablon_sessions(id),
-  episode_id TEXT NOT NULL REFERENCES nablon_episodes(id),
+  episode_id TEXT REFERENCES nablon_episodes(id),
   event_name TEXT NOT NULL,
   turn_index INT NOT NULL,
+  set_id TEXT,
+  scenario_id TEXT,
+  program_version TEXT,
+  runtime_version TEXT,
   payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMP DEFAULT NOW()
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Additive compatibility for databases created by earlier revisions.
+ALTER TABLE nablon_events ADD COLUMN IF NOT EXISTS set_id TEXT;
+ALTER TABLE nablon_events ADD COLUMN IF NOT EXISTS scenario_id TEXT;
+ALTER TABLE nablon_events ADD COLUMN IF NOT EXISTS program_version TEXT;
+ALTER TABLE nablon_events ADD COLUMN IF NOT EXISTS runtime_version TEXT;
+ALTER TABLE nablon_events ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMPTZ;
+UPDATE nablon_events SET occurred_at = created_at AT TIME ZONE 'UTC' WHERE occurred_at IS NULL;
+ALTER TABLE nablon_events ALTER COLUMN occurred_at SET DEFAULT NOW();
+ALTER TABLE nablon_events ALTER COLUMN occurred_at SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS nablon_processed_updates (
   update_id BIGINT PRIMARY KEY,
-  processed_at TIMESTAMP DEFAULT NOW()
+  processed_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS nablon_routing_telemetry (
@@ -60,7 +75,7 @@ CREATE TABLE IF NOT EXISTS nablon_routing_telemetry (
   routing_class TEXT NOT NULL CHECK (routing_class IN ('ACTION','EXPLAIN','UNCLEAR')),
   confidence NUMERIC,
   classifier_version TEXT NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS nablon_outbox (
@@ -74,29 +89,38 @@ CREATE TABLE IF NOT EXISTS nablon_outbox (
   reply_markup JSONB,
   status TEXT NOT NULL CHECK (status IN ('PENDING','SENDING','SENT')),
   attempts INT NOT NULL DEFAULT 0,
-  created_at TIMESTAMP DEFAULT NOW(),
-  claimed_at TIMESTAMP,
-  sent_at TIMESTAMP,
-  next_attempt_at TIMESTAMP DEFAULT NOW(),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  claimed_at TIMESTAMPTZ,
+  sent_at TIMESTAMPTZ,
+  next_attempt_at TIMESTAMPTZ DEFAULT NOW(),
   last_error TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_nablon_outbox_pending
   ON nablon_outbox(status, next_attempt_at, created_at);
-
 CREATE INDEX IF NOT EXISTS idx_nablon_outbox_session
   ON nablon_outbox(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_nablon_processed_updates_time
+  ON nablon_processed_updates(processed_at);
+CREATE INDEX IF NOT EXISTS idx_nablon_sessions_user
+  ON nablon_sessions(user_id, started_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_session_number
+  ON nablon_sessions(user_id, session_number);
+CREATE INDEX IF NOT EXISTS idx_nablon_episodes_session
+  ON nablon_episodes(session_id, turn_index);
+CREATE INDEX IF NOT EXISTS idx_nablon_events_session
+  ON nablon_events(session_id, occurred_at, id);
+CREATE INDEX IF NOT EXISTS idx_nablon_events_user
+  ON nablon_events(user_id, occurred_at, id);
+CREATE INDEX IF NOT EXISTS idx_nablon_events_set_scenario
+  ON nablon_events(set_id, scenario_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_nablon_events_program_version
+  ON nablon_events(program_version, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_nablon_routing_episode
+  ON nablon_routing_telemetry(episode_id, created_at);
 
-CREATE INDEX IF NOT EXISTS idx_nablon_processed_updates_time ON nablon_processed_updates(processed_at);
-CREATE INDEX IF NOT EXISTS idx_nablon_sessions_user ON nablon_sessions(user_id, started_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_session_number ON nablon_sessions(user_id, session_number);
-CREATE INDEX IF NOT EXISTS idx_nablon_episodes_session ON nablon_episodes(session_id, turn_index);
-CREATE INDEX IF NOT EXISTS idx_nablon_events_session ON nablon_events(session_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_nablon_events_user ON nablon_events(user_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_nablon_routing_episode ON nablon_routing_telemetry(episode_id, created_at);
-
--- Only one live training session may exist per user.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_one_active_session ON nablon_sessions(user_id) WHERE status='ACTIVE';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_one_active_session
+  ON nablon_sessions(user_id) WHERE status='ACTIVE';
 
 DO $$
 BEGIN
@@ -116,9 +140,10 @@ FROM (
   FROM nablon_episodes
   ORDER BY session_id, started_at DESC, id DESC
 ) x
-WHERE s.id=x.session_id AND s.current_episode_id IS NULL AND s.status='ACTIVE';
+WHERE s.id=x.session_id
+  AND s.current_episode_id IS NULL
+  AND s.status='ACTIVE';
 
--- Additive migration for databases created by earlier v0.1 revisions.
 ALTER TABLE nablon_sessions ADD COLUMN IF NOT EXISTS session_number INT;
 UPDATE nablon_sessions s SET session_number = x.session_number
 FROM (
