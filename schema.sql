@@ -47,6 +47,29 @@ CREATE TABLE IF NOT EXISTS nablon_events (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Immutable capture record for the user's actual response.
+-- This is evidence, not an interpretation of the evidence.
+CREATE TABLE IF NOT EXISTS nablon_user_responses (
+  id BIGSERIAL PRIMARY KEY,
+  response_id TEXT UNIQUE NOT NULL,
+  user_id INT NOT NULL REFERENCES users(id),
+  session_id TEXT NOT NULL REFERENCES nablon_sessions(id),
+  episode_id TEXT NOT NULL REFERENCES nablon_episodes(id),
+  scene_id TEXT NOT NULL,
+  turn_index INT NOT NULL,
+  telegram_update_id BIGINT,
+  telegram_message_id BIGINT,
+  chat_id BIGINT,
+  received_at TIMESTAMP NOT NULL,
+  prompt TEXT,
+  raw_text TEXT NOT NULL,
+  text_length INT NOT NULL,
+  has_text BOOLEAN NOT NULL,
+  is_reply BOOLEAN NOT NULL DEFAULT FALSE,
+  reply_to_message_id BIGINT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS nablon_processed_updates (
   update_id BIGINT PRIMARY KEY,
   processed_at TIMESTAMP DEFAULT NOW()
@@ -83,10 +106,8 @@ CREATE TABLE IF NOT EXISTS nablon_outbox (
 
 CREATE INDEX IF NOT EXISTS idx_nablon_outbox_pending
   ON nablon_outbox(status, next_attempt_at, created_at);
-
 CREATE INDEX IF NOT EXISTS idx_nablon_outbox_session
   ON nablon_outbox(session_id, created_at);
-
 CREATE INDEX IF NOT EXISTS idx_nablon_processed_updates_time ON nablon_processed_updates(processed_at);
 CREATE INDEX IF NOT EXISTS idx_nablon_sessions_user ON nablon_sessions(user_id, started_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_session_number ON nablon_sessions(user_id, session_number);
@@ -94,6 +115,8 @@ CREATE INDEX IF NOT EXISTS idx_nablon_episodes_session ON nablon_episodes(sessio
 CREATE INDEX IF NOT EXISTS idx_nablon_events_session ON nablon_events(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_nablon_events_user ON nablon_events(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_nablon_routing_episode ON nablon_routing_telemetry(episode_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_nablon_user_responses_user ON nablon_user_responses(user_id, received_at);
+CREATE INDEX IF NOT EXISTS idx_nablon_user_responses_episode ON nablon_user_responses(episode_id, received_at);
 
 -- Only one live training session may exist per user.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_one_active_session ON nablon_sessions(user_id) WHERE status='ACTIVE';
