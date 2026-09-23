@@ -5,13 +5,6 @@ const cron = require('node-cron');
 const { runMigration } = require('./migrate');
 const { bot, dailyCronTick, pool, resumeActiveSessions, flushOutbox } = require('./bot');
 
-// Render Web Service (free tier) требует слушать порт и засыпает без обращений
-// раз в ~15 минут. Health-check эндпоинт + внешний пинг (UptimeRobot) держат
-// процесс живым бесплатно — тот же приём, что уже применялся в Impact.
-//
-// /debug?key=<BOT_TOKEN> — временный способ посмотреть данные из браузера без
-// SQL-клиента. Защищён тем же токеном, что уже есть в env (репозиторий Public,
-// поэтому без защиты адрес был бы открыт всем). Убрать после теста.
 const PORT = process.env.PORT || 3000;
 http
   .createServer(async (req, res) => {
@@ -47,27 +40,27 @@ http
   })
   .listen(PORT, () => console.log(`Health-check server on port ${PORT}`));
 
-async function main() {
-  await runMigration(); // применяет schema.sql — локальный SQL-клиент не нужен
+let launchRetryTimer = null;
 
-  // На случай, если на боте случайно включён webhook (конфликтует с long polling
-  // и даёт ровно 409 Conflict) — явно снимаем его и сбрасываем зависшую очередь.
+async function main() {
+  await runMigration();
+
   try {
     await bot.telegram.deleteWebhook();
   } catch (err) {
     console.error('deleteWebhook failed (non-fatal):', err.message);
   }
 
-  // Restore active sessions before polling starts, so a process restart does not
-  // strand a user on an episode that is already persisted as ACTIVE.
   await resumeActiveSessions();
   await flushOutbox(20);
 
-  // launch() retries transient Telegram polling failures without killing the
-  // health-check server.
-  let launchRetryTimer = null;
   function launchWithRetry() {
+    if (launchRetryTimer) {
+      clearTimeout(launchRetryTimer);
+      launchRetryTimer = null;
+    }
     bot.launch().catch((err) => {
+      if (shuttingDown) return;
       console.error('bot.launch() failed:', err.message, '— retry in 15s');
       launchRetryTimer = setTimeout(launchWithRetry, 15000);
     });
@@ -93,7 +86,10 @@ let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  if (launchRetryTimer) clearTimeout(launchRetryTimer);
+  if (launchRetryTimer) {
+    clearTimeout(launchRetryTimer);
+    launchRetryTimer = null;
+  }
   try { bot.stop(signal); } catch (e) { console.error('bot.stop failed:', e.message); }
   try { await pool.end(); } catch (e) { console.error('pool.end failed:', e.message); }
 }
