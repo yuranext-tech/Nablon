@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS nablon_sessions (
 CREATE TABLE IF NOT EXISTS nablon_episodes (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES nablon_sessions(id),
-  scene_id TEXT NOT NULL,
+  scene_id TEXT,
+  scenario_id TEXT,
   turn_index INT NOT NULL DEFAULT 0,
   status TEXT NOT NULL CHECK (status IN ('NOT_STARTED','WAITING_RESPONSE','WAITING_NEW_DECISION','COMPLETED','INCOMPLETE')),
   support_stage TEXT NOT NULL CHECK (support_stage IN ('NONE','DIRECTED')),
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS nablon_episodes (
 );
 
 ALTER TABLE nablon_sessions ADD COLUMN IF NOT EXISTS current_episode_id TEXT;
+ALTER TABLE nablon_episodes ADD COLUMN IF NOT EXISTS scenario_id TEXT;
 
 CREATE TABLE IF NOT EXISTS nablon_events (
   id BIGSERIAL PRIMARY KEY,
@@ -108,6 +110,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_nablon_session_number
   ON nablon_sessions(user_id, session_number);
 CREATE INDEX IF NOT EXISTS idx_nablon_episodes_session
   ON nablon_episodes(session_id, turn_index);
+CREATE INDEX IF NOT EXISTS idx_nablon_episodes_scenario
+  ON nablon_episodes(scenario_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_nablon_events_session
   ON nablon_events(session_id, occurred_at, id);
 CREATE INDEX IF NOT EXISTS idx_nablon_events_user
