@@ -7,6 +7,7 @@ const { SCENES, QUESTION_ANSWERS } = require('./probes');
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const ROUTER_VERSION = 'mvp-router-v0.1';
+const ROUTER_TIMEOUT_MS = 8000;
 
 const START_TEXT = 'Nablon\nТренажёр здравого смысла.\n\nКороткие ситуации из обычной жизни.\nНапиши, что думаешь и что сделаешь — как в жизни.\n\nОбычно это занимает несколько минут.';
 const START_BUTTON = Markup.inlineKeyboard([[Markup.button.callback('Начать', 'start_training')]]);
@@ -64,10 +65,13 @@ function routeLocal(text) {
 }
 async function route(text, prompt) {
   if (!process.env.OPENAI_API_KEY) return routeLocal(text);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ROUTER_TIMEOUT_MS);
   try {
     const r = await fetch('https://api.openai.com/v1/chat/completions', {
       method:'POST',
       headers:{'Content-Type':'application/json',Authorization:'Bearer '+process.env.OPENAI_API_KEY},
+      signal: controller.signal,
       body:JSON.stringify({
         model:process.env.OPENAI_MODEL || 'gpt-4o-mini', temperature:0,
         response_format:{type:'json_object'},
@@ -81,7 +85,12 @@ async function route(text, prompt) {
     const j=JSON.parse((await r.json()).choices?.[0]?.message?.content || '{}');
     if (!['ACTION','EXPLAIN','UNCLEAR'].includes(j.class)) return routeLocal(text);
     return {c:j.class,confidence:Number.isFinite(Number(j.confidence))?Number(j.confidence):.5};
-  } catch(e) { console.error('router fallback:',e.message); return routeLocal(text); }
+  } catch(e) {
+    console.error('router fallback:', e.name === 'AbortError' ? `timeout after ${ROUTER_TIMEOUT_MS}ms` : e.message);
+    return routeLocal(text);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 function scene(ep) { return SCENES.find(s=>s.id===ep.scene_id); }
 
@@ -190,26 +199,19 @@ bot.action('start_training',async ctx=>{
   const client=await pool.connect();
   try {
     await client.query('BEGIN');
-    // Serialize session creation per user so two concurrent button deliveries
-    // cannot receive the same session_number.
     const lockedUser=(await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[u.id])).rows[0];
     if (!lockedUser) { await client.query('ROLLBACK'); return; }
     const active=(await client.query("SELECT id FROM nablon_sessions WHERE user_id=$1 AND status='ACTIVE' LIMIT 1",[u.id])).rows[0];
     if (active) { await client.query('ROLLBACK'); return ctx.reply('У тебя уже есть незавершённый сет.'); }
     const n=(await client.query('SELECT COALESCE(MAX(session_number),0)+1 AS session_number FROM nablon_sessions WHERE user_id=$1',[u.id])).rows[0].session_number;
-    await client.query(
-      "INSERT INTO nablon_sessions (id,user_id,session_number,mode,training_id,current_episode_index,status) VALUES ($1,$2,$3,'live','condition_change_test_v01',0,'ACTIVE')",
-      [sId,u.id,n]
-    );
+    await client.query("INSERT INTO nablon_sessions (id,user_id,session_number,mode,training_id,current_episode_index,status) VALUES ($1,$2,$3,'live','condition_change_test_v01',0,'ACTIVE')",[sId,u.id,n]);
     s=(await client.query('SELECT * FROM nablon_sessions WHERE id=$1',[sId])).rows[0];
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK');
     if (e.code === '23505') return ctx.reply('У тебя уже есть незавершённый сет.');
     throw e;
-  } finally {
-    client.release();
-  }
+  } finally { client.release(); }
   await startEpisode(u,s,0);
 });
 bot.action('ask',async ctx=>{
@@ -244,8 +246,7 @@ bot.on('text',async ctx=>{
       const locked=(await client.query('SELECT * FROM nablon_episodes WHERE id=$1 FOR UPDATE',[ep.id])).rows[0];
       if(!locked || locked.status!=='WAITING_RESPONSE') { await client.query('ROLLBACK'); return; }
       await event(client,u,s,locked,'NABLON_USER_RESPONDED',1,{raw_text:text});
-      await client.query('INSERT INTO nablon_routing_telemetry (user_id,session_id,episode_id,routing_class,confidence,classifier_version) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,s.id,locked.id,rt.c,rt.confidence]);
-
+      await client.query('INSERT INTO nablon_routing_telemetry (user_id,session_id,episode_id,routing_class,confidence,classifier_version) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,s.id,locked.id,rt.c,rt.confidence,ROUTER_VERSION]);
       if (!sc.intervention?.question) {
         await client.query("UPDATE nablon_episodes SET turn_index=1,status='COMPLETED',completed_at=NOW(),routing_class=$1,classifier_version=$2 WHERE id=$3",[rt.c,ROUTER_VERSION,locked.id]);
         await event(client,u,s,locked,'NABLON_EPISODE_COMPLETED',1,{transfer:true});
@@ -255,7 +256,6 @@ bot.on('text',async ctx=>{
         if(next>=SCENES.length) await finish(u,fresh); else await startEpisode(u,fresh,next);
         return;
       }
-
       await client.query("UPDATE nablon_episodes SET turn_index=2,status='WAITING_NEW_DECISION',support_stage='DIRECTED',routing_class=$1,classifier_version=$2 WHERE id=$3",[rt.c,ROUTER_VERSION,locked.id]);
       const q=sc.intervention.question;
       await event(client,u,s,locked,'NABLON_PROMPT_SHOWN',2,{prompt:q});
@@ -286,100 +286,19 @@ bot.on('text',async ctx=>{
 });
 
 async function resumeActiveSessions() {
-  const r = await pool.query(
-    "SELECT s.*, u.telegram_id FROM nablon_sessions s JOIN users u ON u.id=s.user_id WHERE s.status='ACTIVE' ORDER BY s.started_at ASC"
-  );
-
-  for (const s of r.rows) {
-    let ep = null;
-    if (s.current_episode_id) {
-      ep = (await pool.query(
-        "SELECT * FROM nablon_episodes WHERE id=$1 AND session_id=$2",
-        [s.current_episode_id,s.id]
-      )).rows[0] || null;
-    }
-
-    if (ep && ep.status === 'COMPLETED') {
-      // Crash recovery: the previous episode committed, but the next episode
-      // was not started before the process stopped. Advance the session.
-      const nextIndex = Number(s.current_episode_index) + 1;
-      if (nextIndex >= SCENES.length) {
-        try { await finish({id:s.user_id,telegram_id:s.telegram_id},s); }
-        catch(e){ console.error('resumeActiveSessions completed->finish:',s.id,e.message); }
-      } else {
-        await startEpisode({id:s.user_id,telegram_id:s.telegram_id},s,nextIndex);
-      }
-      continue;
-    }
-
-    if (!ep) {
-      // Compatibility/recovery path for sessions created before current_episode_id.
-      const fallback=(await pool.query(
-        "SELECT * FROM nablon_episodes WHERE session_id=$1 AND status IN ('WAITING_RESPONSE','WAITING_NEW_DECISION','INCOMPLETE') ORDER BY started_at DESC LIMIT 1",
-        [s.id]
-      )).rows[0];
-      ep=fallback || null;
-    }
-
-    if (!ep) {
-      const last=(await pool.query(
-        "SELECT * FROM nablon_episodes WHERE session_id=$1 ORDER BY turn_index DESC, started_at DESC LIMIT 1",
-        [s.id]
-      )).rows[0];
-      const nextIndex=last ? Number(s.current_episode_index)+1 : 0;
-      if(nextIndex>=SCENES.length){
-        try{ await finish({id:s.user_id,telegram_id:s.telegram_id},s); }
-        catch(e){ console.error('resumeActiveSessions finish:',s.id,e.message); }
-      } else {
-        await startEpisode({id:s.user_id,telegram_id:s.telegram_id},s,nextIndex);
-      }
-      continue;
-    }
-
-    const promptResult=await pool.query(
-      "SELECT payload,turn_index FROM nablon_events WHERE episode_id=$1 AND event_name='NABLON_PROMPT_SHOWN' ORDER BY created_at DESC LIMIT 1",
-      [ep.id]
-    );
-    const prompt=promptResult.rows[0]?.payload?.prompt;
-    const promptTurn=promptResult.rows[0]?.turn_index ?? 0;
-    if(!prompt){
-      console.error('resumeActiveSessions: waiting episode has no prompt',ep.id);
-      continue;
-    }
-
-    if(ep.status==='INCOMPLETE'){
-      const repaired=await pool.query(
-        "UPDATE nablon_episodes SET status='WAITING_RESPONSE',completed_at=NULL WHERE id=$1 AND status='INCOMPLETE' RETURNING *",
-        [ep.id]
-      );
-      if(!repaired.rows.length) continue;
-      ep.status='WAITING_RESPONSE';
-    }
-
-    // Recovery does not create a second "resume" message. It reconstructs the
-    // canonical prompt outbox item; if it was already SENT, the unique logical
-    // key makes this a no-op. If it was never sent, the worker delivers it.
-    try {
-      const client=await pool.connect();
-      try{
-        await client.query('BEGIN');
-        await event(client,{id:s.user_id},s,ep,'NABLON_SESSION_RESUMED',ep.turn_index,{status:ep.status,scene_id:ep.scene_id});
-        await enqueueOutbox(client,{
-          user:{id:s.user_id,telegram_id:s.telegram_id},
-          session:s,
-          episode:ep,
-          logicalKey:`session:${s.id}:episode:${ep.id}:prompt:${promptTurn}`,
-          text:prompt
-        });
-        await client.query('COMMIT');
-      }catch(e){ await client.query('ROLLBACK'); throw e; }
-      finally{ client.release(); }
-      await flushOutbox(1);
-    }catch(e){
-      console.error('resumeActiveSessions outbox:',s.id,e.message);
-    }
+  const r=await pool.query("SELECT s.*, u.id AS uid, u.telegram_id FROM nablon_sessions s JOIN users u ON u.id=s.user_id WHERE s.status='ACTIVE'");
+  for(const s of r.rows) {
+    const ep=s.current_episode_id ? (await pool.query('SELECT * FROM nablon_episodes WHERE id=$1',[s.current_episode_id])).rows[0] : null;
+    if(ep) console.log('Resuming active session',s.id,'episode',ep.id,ep.status);
+    else console.warn('Active session without current episode',s.id);
   }
 }
 
-async function dailyCronTick() {}
-module.exports={bot,dailyCronTick,pool,route,resumeActiveSessions,flushOutbox};
+async function dailyCronTick() {
+  const r=await pool.query("SELECT u.id,u.telegram_id FROM users u WHERE u.last_active_at < NOW()-INTERVAL '7 days' LIMIT 100");
+  for(const u of r.rows) {
+    console.log('inactive user',u.telegram_id);
+  }
+}
+
+module.exports={bot,pool,resumeActiveSessions,flushOutbox,dailyCronTick};
