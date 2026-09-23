@@ -54,10 +54,19 @@ async function activeSession(userId) {
   return r.rows[0] || null;
 }
 async function event(client, user, session, episode, name, turn, payload={}) {
-  await client.query(
-    'INSERT INTO nablon_events (user_id,session_id,episode_id,event_name,turn_index,payload) VALUES ($1,$2,$3,$4,$5,$6)',
-    [user.id,session.id,episode.id,name,turn,JSON.stringify(payload)]
-  );
+  return recordL0Event({
+    client,
+    event_name: name,
+    user_id: user.id,
+    session_id: session.id,
+    episode_id: episode?.id || null,
+    set_id: session.training_id || null,
+    scenario_id: episode?.scene_id || null,
+    turn_index: turn,
+    program_version: PROGRAM_VERSION,
+    runtime_version: RUNTIME_VERSION,
+    payload,
+  });
 }
 function routeLocal(text) {
   const action = /\b(сделаю|сделать|напишу|позвоню|пойду|закажу|подожду|спрошу|проверю|начну|отложу|отменю|решу|буду|не буду|сначала|потом)\b/i.test(text);
