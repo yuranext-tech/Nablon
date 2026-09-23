@@ -73,3 +73,38 @@ assert.ok(bot.includes('Compatibility/recovery path for sessions created before 
 assert.ok(bot.includes('canonical prompt outbox item'));\nassert.ok(bot.includes("ep && ep.status === 'COMPLETED'"));\nassert.ok(bot.includes('completed->finish'));
 
 assert.ok(!bot.includes("const resumeText = 'Продолжим с того места, где остановились."));
+
+const { recordL0Event } = require('../nablon/runtime/l0-events');
+
+(async () => {
+  const calls = [];
+  const fakeClient = { query: async (sql, params) => {
+    calls.push({ sql, params });
+    return { rows: [{ id: 42, occurred_at: '2026-01-01T00:00:00.000Z' }] };
+  }};
+  const result = await recordL0Event({
+    client: fakeClient,
+    event_name: 'USER_RESPONSE',
+    user_id: 7,
+    session_id: 'ses_1',
+    episode_id: 'ep_1',
+    set_id: 'set_1',
+    scenario_id: 'scenario_1',
+    turn_index: 2,
+    program_version: 'program-v1',
+    runtime_version: 'runtime-v1',
+    payload: { raw_text: 'проверю сначала' }
+  });
+  assert.strictEqual(result.id, 42);
+  assert.strictEqual(calls.length, 1);
+  assert.ok(calls[0].sql.includes('occurred_at'));
+  assert.deepStrictEqual(calls[0].params.slice(0, 9), [7,'ses_1','ep_1','USER_RESPONSE',2,'set_1','scenario_1','program-v1','runtime-v1']);
+  assert.strictEqual(calls[0].params[9], JSON.stringify({ raw_text: 'проверю сначала' }));
+
+  await assert.rejects(() => recordL0Event({
+    client: fakeClient, user_id: 7, session_id: 'ses_1',
+    runtime_version: 'runtime-v1', payload: {}
+  }), /program_version is required/);
+
+  console.log('L0 event recorder smoke tests: OK');
+})();
