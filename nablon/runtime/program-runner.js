@@ -24,7 +24,7 @@ async function startSet({ client, user, set }) {
     );
 
     await client.query(
-      "INSERT INTO nablon_episodes (id,session_id,scene_id,turn_index,status,support_stage) VALUES ($1,$2,$3,0,'WAITING_RESPONSE','NONE')",
+      "INSERT INTO nablon_episodes (id,session_id,scene_id,scenario_id,turn_index,status,support_stage) VALUES ($1,$2,$3,$3,0,'WAITING_RESPONSE','NONE')",
       [episodeId, sessionId, first.id]
     );
 
