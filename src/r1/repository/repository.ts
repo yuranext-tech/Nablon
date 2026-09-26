@@ -70,7 +70,7 @@ export class InMemoryRepository implements Repository {
       return await operation();
     } finally {
       release();
-      if (this.locks.get(episodeId) === current) this.locks.delete(episodeId);
+      if (this.locks.get(episodeId) === queued) this.locks.delete(episodeId);
     }
   }
 }
