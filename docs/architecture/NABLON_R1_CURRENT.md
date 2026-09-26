@@ -16,7 +16,7 @@ R1 не зависит от исследовательских гипотез и
 - optimistic version locking;
 - idempotent command receipts;
 - атомарное применение команды;
-- защита от конкурентных операций одного пользователя.
+- защита от конкурентных операций одного эпизода.
 
 ## 2. Основные сущности
 
@@ -24,13 +24,13 @@ R1 не зависит от исследовательских гипотез и
 
 Эпизод — ограниченная во времени единица взаимодействия.
 
-Он содержит:
-- идентификатор эпизода;
-- идентификатор пользователя;
-- текущую версию;
-- состояние эпизода;
-- последовательность/ссылки на canonical events;
-- при необходимости pendingCandidate.
+Минимально содержит:
+- `episode_id`;
+- `user_id`;
+- текущую `version`;
+- `status`;
+- протокольное `state`;
+- последовательность/ссылки на canonical events.
 
 Episode хранит только состояние, необходимое для исполнения протокола. Долговременная интерпретация поведения не является его ответственностью.
 
@@ -38,15 +38,33 @@ Episode хранит только состояние, необходимое д�
 
 Command — намерение изменить состояние Episode.
 
+Контракт:
+- `command_id`;
+- `episode_id`;
+- `expected_version`;
+- `type`;
+- `payload`.
+
 Каждая команда:
 1. проверяется относительно текущего состояния;
 2. либо порождает canonical events;
 3. либо отклоняется как технически недопустимая;
 4. получает idempotency receipt.
 
+`command_id` генерируется один раз для пользовательского действия до первой попытки доставки и сохраняется при transport retry. Он не выводится из содержимого команды.
+
 ### CanonicalEvent
 
 CanonicalEvent — неизменяемая запись фактически принятого изменения состояния.
+
+Минимально содержит:
+- `event_id`;
+- `episode_id`;
+- `sequence`;
+- `command_id`;
+- `type`;
+- `payload`;
+- `occurred_at`.
 
 События образуют последовательность, достаточную для восстановления состояния и последующей реконструкции поведения.
 
@@ -159,13 +177,48 @@ Hypothesis в Becoming должна быть привязана к конкре�
 
 R1 использует idempotency receipt.
 
-Повтор команды с тем же идентификатором должен возвращать ранее зафиксированный результат, а не повторно исполнять команду.
+### Семантика command_id
 
-Idempotency должна быть частью атомарной границы изменения состояния.
+`command_id`:
+- создаётся адаптером один раз на пользовательское действие;
+- сохраняется неизменным при transport retry;
+- не вычисляется из command contents;
+- уникален для конкретной попытки пользовательского действия.
+
+### Приоритет idempotency
+
+Проверка receipt выполняется после захвата lock и **до** проверки `expected_version`.
+
+Если receipt для `command_id` уже существует:
+- команда не исполняется повторно;
+- текущая версия Episode не проверяется для целей отказа;
+- возвращается сохранённый исходный ApplicationResult;
+- статус результата: `REPLAYED`.
+
+Таким образом, idempotency побеждает version conflict для уже исполненной команды.
+
+Если receipt отсутствует, применяется обычная проверка `expected_version`. Новый command с устаревшей версией получает `CONFLICT`.
+
+### Receipt
+
+Receipt должен хранить не только факт исполнения, а сериализованный **полный ApplicationResult** исходной команды, включая:
+- status;
+- command_id;
+- episode_id;
+- episode_version;
+- canonical_events[].
+
+Поэтому `REPLAYED` может вернуть тот же результат, который получил исходный клиент, а не реконструированный или сокращённый ответ.
+
+Receipt входит в ту же атомарную границу, что и изменение Episode и canonical events.
 
 ## 10. Concurrency
 
-Для операций одного пользователя применяется keyed mutex или эквивалентная сериализация.
+Для операций одного Episode применяется keyed mutex или эквивалентная сериализация по `episode_id`.
+
+Последовательность исполнения команды начинается с захвата соответствующего lock.
+
+Это означает, что конкурентный retry с тем же `command_id`, пришедший до завершения первой команды, ждёт lock; после commit он видит receipt и получает `REPLAYED`.
 
 Дополнительно состояние защищается optimistic version locking.
 
@@ -173,6 +226,8 @@ Idempotency должна быть частью атомарной границы
 - две конкурентные команды не должны незаметно потерять изменения друг друга;
 - повторная команда не должна создавать дубликат;
 - частично применённая команда не должна оставлять состояние.
+
+Глобальный mutex для всех эпизодов не требуется и не является контрактным решением.
 
 ## 11. Atomic rollback
 
@@ -186,17 +241,90 @@ Idempotency должна быть частью атомарной границы
 - idempotency receipt;
 - связанным R1-изменениям.
 
+Концептуальная граница операции:
+
+lock Episode
+→ check receipt
+→ load Episode
+→ check expected_version
+→ reducer
+→ EventDraft[]
+→ materialize CanonicalEvent[]
+→ atomically persist Episode + events + receipt
+→ return ApplicationResult
+
+Ошибки до commit не должны оставлять частично применённое состояние.
+
+Для будущего Postgres Repository атомарность является отдельным acceptance-критерием: Episode, canonical events и receipt должны сохраняться в одной реальной multi-row/multi-table транзакции и завершаться одним `COMMIT`. In-memory rollback не считается доказательством Postgres-атомарности.
+
 ## 12. Application layer
 
 Application layer является единой точкой исполнения use case.
+
+### ApplicationResult
+
+ApplicationResult содержит только факты о выполнении:
+
+- `status`;
+- `command_id`;
+- `episode_id`;
+- `episode_version`;
+- `canonical_events[]`.
+
+Рекомендуемые статусы:
+- `APPLIED`;
+- `REPLAYED`;
+- `REJECTED`;
+- `CONFLICT`.
+
+В ApplicationResult не должно быть:
+- `next_action`;
+- `prompt`;
+- `message`;
+- `effect`;
+- `suggestion`;
+- другого предписания адаптеру о том, что делать дальше.
+
+При `CONFLICT` поле `episode_version` содержит **актуальную текущую версию Episode**, а не `expected_version` из команды. Это позволяет адаптеру при необходимости пересобрать команду без дополнительного чтения Episode.
+
+Application не управляет Telegram/UI/external effects. Адаптер получает ApplicationResult и сам, как отдельная функция от результата, решает, какое внешнее действие выполнить.
+
+### Repository contract
+
+Концептуальный Repository/Application boundary:
+
+`getEpisode(episodeId)`
+`getReceipt(commandId)`
+`saveEpisodeAtomically(episode, canonicalEvents, receipt)`
+`withEpisodeLock(episodeId, operation)`
+
+Транзакционные детали не должны протекать в Application через явные `begin/commit/rollback`; Repository должен скрывать механизм и гарантировать контракт атомарности.
 
 Нельзя сохранять две расходящиеся схемы создания Episode, например:
 - один путь через R1Protocol.openEpisode(), который создаёт EPISODE_OPENED / PROBE_PRESENTED;
 - другой путь через Application.createInitialEpisode(), который обходит canonical event flow.
 
-Следующий архитектурный приоритет: унифицировать создание Episode через один канонический путь.
+Создание Episode должно иметь один канонический путь.
 
-## 13. Telemetry
+## 13. EventDraft и composite transitions
+
+Reducer не должен агрегировать несколько поведенчески значимых промежуточных шагов в один семантически богатый итоговый event.
+
+`EventDraft` представляет один наблюдаемый/протокольно значимый шаг изменения состояния.
+
+Если потеря промежуточного шага может изменить последующую интерпретацию поведения, он должен быть отдельным EventDraft и после materialization — отдельным CanonicalEvent.
+
+Например:
+
+STOP
+→ RECONSIDER
+→ CHANGE_APPROACH
+
+должно сохраняться как три последовательных события, а не как единый `PROCESS_SWITCHED`.
+
+При этом не каждая внутренняя переменная reducer обязана становиться событием. Критерий — поведенческая/протокольная значимость и возможность последующей реконструкции.
+
+## 14. Telemetry
 
 Операционная телеметрия должна быть отделена от raw behavioral log.
 
@@ -208,7 +336,7 @@ Application layer является единой точкой исполнени�
 
 Они полезны для эксплуатации и диагностики, но не должны автоматически становиться материалом для Measurement Layer.
 
-## 14. Граница R1 и исследований
+## 15. Граница R1 и исследований
 
 R1 отвечает на вопрос:
 
@@ -224,16 +352,18 @@ Becoming отвечает ещё на следующий вопрос:
 
 Смешивать эти три уровня нельзя.
 
-## 15. Текущие открытые задачи R1
+## 16. Текущие открытые задачи R1
 
-1. Унифицировать единственный canonical Episode creation path.
+1. Реализовать/проверить единый canonical Episode creation path.
 2. Зафиксировать полный Application/Repository telemetry contract.
 3. Проверить CandidateProposer → Candidate flow без протекания measurement semantics в R1.
 4. Убедиться, что raw event sequence сохраняется достаточно подробно для composite transitions и будущей переклассификации.
-5. Проверить idempotency, rollback и per-user concurrency на всех новых командах.
-6. Не добавлять в R1 lifecycle-состояния, которые принадлежат Measurement Layer.
+5. Проверить idempotency, rollback и per-episode concurrency на всех новых командах.
+6. Реализовать Postgres Repository с настоящей multi-row/multi-table atomic transaction и отдельными acceptance-тестами.
+7. Спроектировать episode-scoped cutover и физически изолированный shadow namespace до начала production shadow/cutover.
+8. Не добавлять в R1 lifecycle-состояния, которые принадлежат Measurement Layer.
 
-## 16. Что сознательно не входит в R1
+## 17. Что сознательно не входит в R1
 
 - оценка интеллекта, рациональности или когнитивной мощности пользователя;
 - итоговые пользовательские scores/rankings;
@@ -243,8 +373,7 @@ Becoming отвечает ещё на следующий вопрос:
 - retroactive переписывание исторических измерений;
 - автоматическая диагностика способности по одному эпизоду.
 
-
-## 17. Extraction boundary: what "minimal R1" means
+## 18. Extraction boundary: what "minimal R1" means
 
 The first extraction step is deliberately narrow.
 
@@ -281,7 +410,7 @@ The previously deferred R1 questions are not reopened by extraction:
 
 The purpose of the extraction is to establish a clean executable core, not to complete every surrounding contract.
 
-## 18. Adapter boundary
+## 19. Adapter boundary
 
 The legacy bot is an adapter around R1, not a second implementation of R1.
 
@@ -303,7 +432,7 @@ A temporary compatibility mapping from legacy observations to R1 commands/events
 
 "One point of entry" refers to protocol execution, not to every infrastructure operation in the whole application.
 
-## 19. Existing observations: archive first, migration later
+## 20. Existing observations: archive first, migration later
 
 Historical `users/probes/observations` data is not automatically converted into the new Raw Episode Event Log.
 
@@ -319,14 +448,118 @@ This means:
 
 No production integration step may depend on a retroactive backfill being completed first.
 
-## 20. Extraction invariant
+## 21. Extraction invariant: one authority per episode
 
-During the strangler extraction, both systems may temporarily coexist, but only one system may be authoritative for a given concern.
+During the strangler extraction, both systems may temporarily coexist, but only one system may be authoritative for a given concern **and episode**.
 
-For protocol execution:
-**R1 is authoritative once an Episode is handed to the R1 path.**
+For protocol execution, the cutover boundary is **episode-scoped, not time-scoped**:
 
-For legacy historical data:
-**legacy observations remain authoritative for their own historical record until a separately specified migration replaces or supplements them.**
+- an Episode that was already opened in legacy before cutover remains owned by legacy and is completed there;
+- R1 does not take over an already-open legacy Episode merely because the wall-clock time passed the cutover;
+- only Episodes opened after the cutover are handed to R1 as authoritative;
+- once an Episode is handed to R1, legacy must not continue executing that Episode's protocol.
 
-The adapter may translate between the two representations, but the two representations must not become co-equal mutable sources of truth.
+Therefore there is never a production protocol Episode for which legacy and R1 are co-equal mutable authorities.
+
+Legacy historical data remains authoritative for its own historical record until a separately specified migration replaces or supplements it.
+
+## 22. Shadow execution isolation
+
+Phase A shadow execution is non-authoritative and must be physically isolated from production R1 state.
+
+A shadow run may use copies of real commands and real `command_id`/`episode_id` values for meaningful comparison, but its:
+- Episode records;
+- CanonicalEvents;
+- receipts;
+- and other mutable R1 state
+
+must be stored in a separate non-authoritative namespace/storage that production execution never reads.
+
+The production path for:
+- `getEpisode`;
+- `getReceipt`;
+- idempotency checks;
+- authoritative writes
+
+must never consult shadow state.
+
+This prevents a shadow receipt from causing a future production command with the same `command_id` to be incorrectly returned as `REPLAYED`, and prevents shadow Episodes/events from colliding with authoritative history.
+
+"Discarded" in Phase A therefore means not merely "ignored by the UI", but "outside every production read/write path".
+
+## 23. Cutover phases
+
+### Phase A — Shadow
+
+- Legacy remains authoritative.
+- R1 may execute a shadow copy of the same use case.
+- Shadow state is physically isolated and non-authoritative.
+- Shadow results are observed/compared but cannot affect production state, receipts, or adapter behavior.
+
+### Phase B — Episode-scoped cutover
+
+- New Episodes for the selected use case are opened through R1.
+- Already-open legacy Episodes remain in legacy until completion.
+- Legacy execution for an R1-owned Episode is disabled.
+- R1 becomes the sole authoritative protocol executor for those Episodes.
+
+### Phase C — Removal
+
+- After the cutover boundary is stable, the legacy execution path for the selected use case is removed.
+- Legacy historical records remain available as archive unless separately migrated.
+
+The transition must not be implemented as two co-equal production writers.
+
+## 24. Contract execution sequence
+
+For a new command:
+
+lock Episode
+→ check receipt
+→ load Episode
+→ check expected_version
+→ reducer
+→ EventDraft[]
+→ materialize CanonicalEvent[]
+→ atomically persist Episode + events + full ApplicationResult receipt
+→ return ApplicationResult(APPLIED)
+
+For an existing receipt:
+
+lock Episode
+→ check receipt
+→ return stored ApplicationResult(REPLAYED)
+
+For a new command with stale version:
+
+lock Episode
+→ check receipt (absent)
+→ load Episode
+→ detect version conflict
+→ return ApplicationResult(CONFLICT, episode_version=current_version)
+
+For a domain-invalid command:
+
+lock Episode
+→ check receipt (absent)
+→ load Episode
+→ version check
+→ domain validation/reducer rejection
+→ return ApplicationResult(REJECTED) according to the defined rejection semantics.
+
+The exact persistence semantics of rejected commands must be fixed per command family; they must not accidentally create state changes while still satisfying idempotency expectations.
+
+## 25. Extraction acceptance invariants
+
+Before handing extraction to implementation, the following must be testable:
+
+1. **Idempotent replay:** same `command_id` returns the stored full ApplicationResult and does not mutate Episode again.
+2. **Replay wins over version conflict:** an already-receipted command returns `REPLAYED` even if its original `expected_version` is now stale.
+3. **Fresh stale command conflicts:** a new `command_id` with stale `expected_version` returns `CONFLICT` and the current `episode_version`.
+4. **Concurrent retry serialization:** concurrent same-`command_id` calls serialize on the Episode lock; only one applies, the others replay.
+5. **Composite event preservation:** behaviorally meaningful intermediate steps are separate EventDrafts/CanonicalEvents.
+6. **Atomicity:** failed persistence leaves Episode, events, and receipt unchanged.
+7. **Postgres atomicity:** when Postgres Repository is implemented, Episode + events + receipt commit in one real database transaction.
+8. **Episode-scoped cutover:** an open legacy Episode never silently changes authority at a wall-clock cutover boundary.
+9. **Shadow isolation:** shadow Episodes/events/receipts are unreachable from production idempotency and Episode reads/writes.
+10. **Single authority:** an Episode is executed by exactly one authoritative protocol path.
