@@ -242,3 +242,91 @@ Becoming отвечает ещё на следующий вопрос:
 - долговременные гипотезы о пользователе;
 - retroactive переписывание исторических измерений;
 - автоматическая диагностика способности по одному эпизоду.
+
+
+## 17. Extraction boundary: what "minimal R1" means
+
+The first extraction step is deliberately narrow.
+
+### Included
+
+The R1 core may contain only:
+- Episode domain state and reducer;
+- Command validation/execution;
+- immutable CanonicalEvent production;
+- idempotency receipt handling;
+- optimistic version check;
+- in-memory Repository;
+- Application use-case boundary;
+- deterministic tests for the above.
+
+### Explicitly excluded from this step
+
+The following must not be pulled into the core merely because they are convenient during extraction:
+- PostgreSQL persistence;
+- Telegram/Telegraf integration;
+- current `users`, `probes`, `observations` tables as domain storage;
+- Measurement Layer;
+- PROCESS_SWITCH classification;
+- Evidence Gate;
+- Becoming/hypothesis generation;
+- Candidate measurement qualification;
+- long-term user interpretation;
+- product engagement/push scheduling.
+
+The previously deferred R1 questions are not reopened by extraction:
+- pendingCandidate lifecycle remains R1-only and must not acquire measurement semantics;
+- telemetry contract remains a separate architectural task;
+- `CONFIRM_CANDIDATE` does not become an evidence-confirmation command inside R1.
+
+The purpose of the extraction is to establish a clean executable core, not to complete every surrounding contract.
+
+## 18. Adapter boundary
+
+The legacy bot is an adapter around R1, not a second implementation of R1.
+
+There must be one narrow application-facing entry point for protocol execution:
+
+Legacy/Telegram layer
+→ Application command
+→ R1 domain execution
+→ canonical result/events
+→ adapter performs external side effects.
+
+The legacy layer must not:
+- mutate Episode state directly;
+- write R1 events directly;
+- read internal reducer state to make protocol decisions;
+- introduce ad-hoc alternate Episode creation paths.
+
+A temporary compatibility mapping from legacy observations to R1 commands/events is allowed at the adapter boundary. It must remain explicit and removable.
+
+"One point of entry" refers to protocol execution, not to every infrastructure operation in the whole application.
+
+## 19. Existing observations: archive first, migration later
+
+Historical `users/probes/observations` data is not automatically converted into the new Raw Episode Event Log.
+
+Initial R1 integration starts with a clean R1 event history for new episodes.
+
+Existing observations remain legacy/archive data unless and until a separately specified migration proves that their original event sequence can be reconstructed without inventing missing events.
+
+This means:
+- old observations may be retained for product continuity and historical analysis;
+- they are not silently declared R1 events;
+- they are not automatically treated as new evidence;
+- any future backfill must be a separate, versioned migration with explicit provenance and uncertainty.
+
+No production integration step may depend on a retroactive backfill being completed first.
+
+## 20. Extraction invariant
+
+During the strangler extraction, both systems may temporarily coexist, but only one system may be authoritative for a given concern.
+
+For protocol execution:
+**R1 is authoritative once an Episode is handed to the R1 path.**
+
+For legacy historical data:
+**legacy observations remain authoritative for their own historical record until a separately specified migration replaces or supplements them.**
+
+The adapter may translate between the two representations, but the two representations must not become co-equal mutable sources of truth.
