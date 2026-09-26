@@ -20,6 +20,7 @@ export type CommandType =
   | 'STOP'
   | 'RECONSIDER'
   | 'CHANGE_APPROACH'
+  | 'RECONSIDER_AND_CHANGE_APPROACH'
   | 'COMPLETE';
 
 export type Command = {
