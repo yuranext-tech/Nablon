@@ -64,7 +64,8 @@ export class InMemoryRepository implements Repository {
     const previous = this.locks.get(episodeId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
-    this.locks.set(episodeId, previous.then(() => current));
+    const queued = previous.then(() => current);
+    this.locks.set(episodeId, queued);
     await previous;
     try {
       return await operation();
