@@ -84,7 +84,7 @@ export function reduce(episode: Episode, command: Command): DomainDecision {
       return apply(episode, { phase: 'ACTIVE', marker: 'CHANGED_APPROACH' }, [
         { type: 'CHANGE_APPROACH', payload: {} },
       ]);
-    case 'COMPLETE':
+    case 'RECONSIDER_AND_CHANGE_APPROACH':\n      if (episode.state.marker !== 'STOPPED') return reject(episode, 'reconsider_and_change_approach_not_allowed');\n      return apply(episode, { phase: 'ACTIVE', marker: 'CHANGED_APPROACH' }, [\n        { type: 'RECONSIDER', payload: {} },\n        { type: 'CHANGE_APPROACH', payload: {} },\n      ]);\n    case 'COMPLETE':
       if (episode.state.phase !== 'ACTIVE') return reject(episode, 'complete_not_allowed');
       return apply(episode, { phase: 'COMPLETED', marker: null }, [
         { type: 'EPISODE_COMPLETED', payload: {} },
