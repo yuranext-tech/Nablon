@@ -547,7 +547,7 @@ lock Episode
 → domain validation/reducer rejection
 → return ApplicationResult(REJECTED) according to the defined rejection semantics.
 
-The exact persistence semantics of rejected commands must be fixed per command family; they must not accidentally create state changes while still satisfying idempotency expectations.
+`REJECTED` is an окончательный результат конкретного command attempt. Если команда дошла до Application и получила `REJECTED`, receipt сохраняется с полным `ApplicationResult`. Повтор той же команды по тому же `command_id` возвращает `REPLAYED` с тем же сохранённым результатом; команда не исполняется повторно. При этом rejected command не должна создавать domain state change или canonical events, если конкретный command contract явно не определяет иное.
 
 ## 25. Extraction acceptance invariants
 
