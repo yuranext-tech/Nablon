@@ -11,34 +11,35 @@ export class Application {
   ) {}
 
   async openEpisode(episodeId: string, userId: string, commandId: string): Promise<ApplicationResult> {
-    const existing = await this.repository.getEpisode(episodeId);
-    if (existing) throw new Error('episode_already_exists');
-    const episode = createInitialEpisode(episodeId, userId);
-    const event: CanonicalEvent = {
-      event_id: this.makeId(),
-      episode_id: episodeId,
-      sequence: 1,
-      command_id: commandId,
-      type: 'EPISODE_OPENED',
-      payload: {},
-      occurred_at: this.now(),
-    };
-    const result: ApplicationResult = {
-      status: 'APPLIED',
-      command_id: commandId,
-      episode_id: episodeId,
-      episode_version: episode.version,
-      canonical_events: [event],
-    };
-    await this.repository.withEpisodeLock(episodeId, async () => {
+    return this.repository.withEpisodeLock(episodeId, async () => {
+      const existingReceipt = await this.repository.getReceipt(commandId);
+      if (existingReceipt) return replay(existingReceipt.result);
       if (await this.repository.getEpisode(episodeId)) throw new Error('episode_already_exists');
+
+      const episode = createInitialEpisode(episodeId, userId);
+      const event: CanonicalEvent = {
+        event_id: this.makeId(),
+        episode_id: episodeId,
+        sequence: 1,
+        command_id: commandId,
+        type: 'EPISODE_OPENED',
+        payload: {},
+        occurred_at: this.now(),
+      };
+      const result: ApplicationResult = {
+        status: 'APPLIED',
+        command_id: commandId,
+        episode_id: episodeId,
+        episode_version: 1,
+        canonical_events: [event],
+      };
       await this.repository.saveEpisodeAtomically(
         { ...episode, version: 1, event_ids: [event.event_id] },
         [event],
-        { command_id: commandId, result: { ...result, episode_version: 1 } },
+        { command_id: commandId, result },
       );
+      return result;
     });
-    return { ...result, episode_version: 1 };
   }
 
   async execute(command: Command): Promise<ApplicationResult> {
