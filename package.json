@@ -4,11 +4,16 @@
   "private": true,
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "r1:typecheck": "tsc -p tsconfig.r1.json",
+    "r1:test": "rm -rf .r1-dist && tsc -p tsconfig.r1.json --noEmit false --outDir .r1-dist && node .r1-dist/test/r1.test.js"
   },
   "dependencies": {
     "telegraf": "^4.16.3",
     "pg": "^8.11.5",
     "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
   }
 }
