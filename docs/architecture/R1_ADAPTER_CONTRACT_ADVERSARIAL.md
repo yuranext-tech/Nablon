@@ -88,16 +88,37 @@ Attack:
 
 The adapter must not map both to a generic retry/error path that loses this distinction.
 
-## Attack 7 — side effect before R1 confirmation
+## Attack 7A — side effect before R1 confirmation
 
-**Invariant:** an external side effect must not be treated as proof that a command was accepted.
+**Invariant:** an external side effect must never occur before R1 has accepted the command and `Application.execute()` has resolved with `APPLIED`.
 
 Attack:
 - make the adapter perform an external effect before `Application.execute()` resolves;
 - force R1 to return `CONFLICT`, `REJECTED`, or throw;
-- verify that the contract does not define the premature effect as part of successful R1 execution.
+- verify that the contract provides no path in which the premature effect is treated as part of successful R1 execution.
 
-R1 does not provide distributed transaction semantics with Telegram/UI/external systems. The contract therefore must explicitly define the adapter's ordering and failure/retry semantics instead of pretending the side effect is atomic with R1.
+This is not a trade-off or an implementation preference. R1 has no way to roll back an external effect after a rejected/conflicting/failed command. Therefore the ordering invariant is strict: **no external effect before `APPLIED`**.
+
+R1 does not provide distributed transaction semantics with Telegram/UI/external systems. This attack is specifically about preventing the adapter from inverting that order.
+
+## Attack 7B — external effect succeeds or becomes uncertain after R1 commit
+
+**Invariant:** once R1 has returned `APPLIED`, R1 state and receipt remain authoritative even if the subsequent external effect fails or its outcome becomes unknown.
+
+Attack:
+- execute a command and obtain `APPLIED` from R1;
+- make the adapter fail before the external effect is attempted, or after the effect is attempted but before delivery confirmation is recorded;
+- restart the adapter;
+- verify that recovery does not call `Application.execute()` as a substitute for recovering the external effect;
+- verify that recovery cannot silently lose the effect or create an uncontrolled duplicate.
+
+This is a different failure class from 7A. The R1 transaction has already succeeded. Re-running the command is not the repair mechanism: `REPLAYED` protects the domain transition, but it does not prove whether the external message/effect was delivered.
+
+**Expected contract direction:** the adapter owns a narrow durable outbox/state record independent of the R1 Repository, keyed to the stable `command_id` (or an explicitly derived effect identity). At minimum it must distinguish an effect that is pending from one whose delivery has been confirmed. Recovery retries delivery from the persisted `ApplicationResult`/effect payload rather than executing the domain command again. The adapter marks the effect delivered only after the external transport confirms delivery according to the transport's own acknowledgement semantics.
+
+The exact delivery semantics still need to be specified per transport. In particular, if the transport itself can return an ambiguous outcome (effect may have been accepted but acknowledgement was lost), the adapter must model that uncertainty rather than falsely marking the effect either definitely delivered or definitely absent. If the transport cannot provide idempotent effect submission, the contract must explicitly accept the remaining duplicate-or-loss risk; R1 command idempotency alone does not remove it.
+
+The outbox belongs to the adapter boundary. It must not be added to R1 merely to make external delivery appear atomic with domain persistence.
 
 ## Additional attack — CONFLICT without Repository read
 
@@ -116,10 +137,13 @@ Attack:
 4. What does the adapter do after `REJECTED`?
 5. What does it do after `REPLAYED`?
 6. What is the retry policy after `CONFLICT`?
-7. What happens if an external side effect succeeds but the transport acknowledgement fails?
-8. What happens if the external side effect fails after R1 has already committed?
-9. Can the adapter ever call Repository directly? The default adversarial answer should be no.
-10. Is `openEpisode()` part of the same adapter contract or a separate lifecycle operation?
+7. Is an external effect ever permitted before `Application.execute()` returns `APPLIED`? Expected answer: no.
+8. What durable adapter state records the lifecycle of an external effect after R1 has committed?
+9. What happens if the external effect succeeds but the transport acknowledgement is lost or becomes ambiguous?
+10. What happens if the external effect fails after R1 has already committed?
+11. How does adapter recovery retry a pending effect without re-executing the R1 command?
+12. Can the adapter ever call Repository directly? The default adversarial answer should be no.
+13. Is `openEpisode()` part of the same adapter contract or a separate lifecycle operation?
 
 ## Non-goals
 
@@ -128,6 +152,7 @@ This review does not implement:
 - Postgres integration;
 - shadow infrastructure;
 - cutover;
+- the adapter outbox itself;
 - external effect delivery guarantees beyond what the Adapter Contract explicitly defines.
 
 Those remain subsequent work.
