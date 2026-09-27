@@ -13,4 +13,8 @@ export type ApplicationResult = {
 export type Receipt = {
   command_id: string;
   result: ApplicationResult;
+  /** Monotonic order of this command attempt within its Episode raw trace. */
+  trace_sequence: number;
+  /** Time at which this command attempt was recorded by R1. */
+  occurred_at: string;
 };

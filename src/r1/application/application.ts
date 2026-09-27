@@ -17,6 +17,7 @@ export class Application {
       if (await this.repository.getEpisode(episodeId)) throw new Error('episode_already_exists');
 
       const episode = createInitialEpisode(episodeId, userId);
+      const occurredAt = this.now();
       const event: CanonicalEvent = {
         event_id: this.makeId(),
         episode_id: episodeId,
@@ -24,7 +25,7 @@ export class Application {
         command_id: commandId,
         type: 'EPISODE_OPENED',
         payload: {},
-        occurred_at: this.now(),
+        occurred_at: occurredAt,
       };
       const result: ApplicationResult = {
         status: 'APPLIED',
@@ -34,9 +35,9 @@ export class Application {
         canonical_events: [event],
       };
       await this.repository.saveEpisodeAtomically(
-        { ...episode, version: 1, event_ids: [event.event_id] },
+        { ...episode, version: 1, event_ids: [event.event_id], trace_sequence: 1 },
         [event],
-        { command_id: commandId, result },
+        { command_id: commandId, result, trace_sequence: 1, occurred_at: occurredAt },
       );
       return result;
     });
@@ -61,6 +62,9 @@ export class Application {
       }
 
       const decision = reduce(episode, command);
+      const occurredAt = this.now();
+      const traceSequence = episode.trace_sequence + 1;
+
       if (decision.kind === 'REJECTED') {
         const result: ApplicationResult = {
           status: 'REJECTED',
@@ -70,9 +74,9 @@ export class Application {
           canonical_events: [],
         };
         await this.repository.saveEpisodeAtomically(
-          episode,
+          { ...episode, trace_sequence: traceSequence },
           [],
-          { command_id: command.command_id, result },
+          { command_id: command.command_id, result, trace_sequence: traceSequence, occurred_at: occurredAt },
         );
         return result;
       }
@@ -88,6 +92,7 @@ export class Application {
       const nextEpisode: Episode = {
         ...decision.episode,
         event_ids: [...episode.event_ids, ...events.map((event) => event.event_id)],
+        trace_sequence: traceSequence,
       };
       const result: ApplicationResult = {
         status: 'APPLIED',
@@ -96,7 +101,12 @@ export class Application {
         episode_version: nextEpisode.version,
         canonical_events: events,
       };
-      const receipt: Receipt = { command_id: command.command_id, result };
+      const receipt: Receipt = {
+        command_id: command.command_id,
+        result,
+        trace_sequence: traceSequence,
+        occurred_at: occurredAt,
+      };
       await this.repository.saveEpisodeAtomically(nextEpisode, events, receipt);
       return result;
     });

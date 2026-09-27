@@ -12,6 +12,8 @@ export type Episode = {
   status: EpisodeStatus;
   state: EpisodeState;
   event_ids: string[];
+  /** Monotonic raw-attempt order; separate from protocol version and event sequence. */
+  trace_sequence: number;
 };
 
 export type CommandType =
@@ -58,6 +60,7 @@ export function createInitialEpisode(episodeId: string, userId: string): Episode
     status: 'OPEN',
     state: { ...INITIAL_STATE },
     event_ids: [],
+    trace_sequence: 0,
   };
 }
 
