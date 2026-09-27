@@ -76,17 +76,10 @@ async function T05_composite_transition() {
   const stopped = await app.execute(command(episodeId, 2, 'STOP', 't05-stop'));
   assert.equal(started.status, 'APPLIED');
   assert.equal(stopped.status, 'APPLIED');
-
-  const composite = await app.execute(
-    command(episodeId, 3, 'RECONSIDER_AND_CHANGE_APPROACH', 't05-composite'),
-  );
-
+  const composite = await app.execute(command(episodeId, 3, 'RECONSIDER_AND_CHANGE_APPROACH', 't05-composite'));
   assert.equal(composite.status, 'APPLIED');
   assert.equal(composite.canonical_events.length, 2);
-  assert.deepEqual(composite.canonical_events.map((event) => event.type), [
-    'RECONSIDER',
-    'CHANGE_APPROACH',
-  ]);
+  assert.deepEqual(composite.canonical_events.map((event) => event.type), ['RECONSIDER', 'CHANGE_APPROACH']);
   assert.equal(composite.canonical_events[0].command_id, 't05-composite');
   assert.equal(composite.canonical_events[1].command_id, 't05-composite');
   assert.equal(composite.canonical_events[0].sequence + 1, composite.canonical_events[1].sequence);
@@ -99,26 +92,19 @@ async function T06_rejected_attempts_are_ordered_in_raw_trace() {
   const episodeId = 'ep-t06';
   await open(app, episodeId);
   await app.execute(command(episodeId, 1, 'START', 't06-start'));
-
   const firstRejected = await app.execute(command(episodeId, 2, 'START', 't06-rejected-1'));
   const secondRejected = await app.execute(command(episodeId, 2, 'START', 't06-rejected-2'));
   const applied = await app.execute(command(episodeId, 2, 'STOP', 't06-applied'));
-
   assert.equal(firstRejected.status, 'REJECTED');
   assert.equal(secondRejected.status, 'REJECTED');
   assert.equal(applied.status, 'APPLIED');
-
   const firstReceipt = await repo.getReceipt('t06-rejected-1');
   const secondReceipt = await repo.getReceipt('t06-rejected-2');
   const appliedReceipt = await repo.getReceipt('t06-applied');
   assert(firstReceipt);
   assert(secondReceipt);
   assert(appliedReceipt);
-
-  assert.deepEqual(
-    [firstReceipt.trace_sequence, secondReceipt.trace_sequence, appliedReceipt.trace_sequence],
-    [3, 4, 5],
-  );
+  assert.deepEqual([firstReceipt.trace_sequence, secondReceipt.trace_sequence, appliedReceipt.trace_sequence], [3, 4, 5]);
   assert.equal(firstReceipt.occurred_at, now());
   assert.equal(secondReceipt.occurred_at, now());
   assert.equal(appliedReceipt.occurred_at, now());
@@ -126,19 +112,12 @@ async function T06_rejected_attempts_are_ordered_in_raw_trace() {
 }
 
 async function run() {
-  const tests = [
-    T01_new_command,
-    T02_retry_after_commit,
-    T03_retry_after_another_command,
-    T04_stale_new_command,
-    T05_composite_transition,
-    T06_rejected_attempts_are_ordered_in_raw_trace,
-  ];
+  const tests = [T01_new_command, T02_retry_after_commit, T03_retry_after_another_command, T04_stale_new_command, T05_composite_transition, T06_rejected_attempts_are_ordered_in_raw_trace];
   for (const test of tests) await test();
   console.log(`PASS ${tests.length} R1 tests`);
 }
 
 void run().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  throw error;
 });
