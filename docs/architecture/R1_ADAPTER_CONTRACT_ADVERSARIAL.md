@@ -53,7 +53,7 @@ The persisted receipt remains the source of the replayed ApplicationResult.
 
 ## Attack 4 — adapter reads or mutates Episode
 
-**Invariant:** the adapter must not read Episode state directly to decide protocol semantics or mutate Episode outside Application.
+**Invariant:** the adapter must not read Episode state directly to decide protocol semantics or mutate Episode outside Application. A narrow read-only catch-up stream of already accepted R1 decisions is a separate recovery interface and does not grant protocol authority.
 
 Attack:
 - give the adapter access to Repository/Episode;
@@ -120,6 +120,25 @@ The exact delivery semantics still need to be specified per transport. In partic
 
 The outbox belongs to the adapter boundary. It must not be added to R1 merely to make external delivery appear atomic with domain persistence.
 
+## Attack 9 — loss between APPLIED and effect intent
+
+**Invariant:** every `APPLIED` result that requires an external effect must eventually have a durable adapter effect intent, even if the adapter crashes after receiving `APPLIED` and before writing its own outbox record.
+
+Attack:
+- execute a command and obtain `APPLIED` from R1;
+- terminate the adapter after R1 has committed but before the adapter's outbox record is durable;
+- restart the adapter;
+- verify that the effect is not silently lost;
+- verify that recovery does not re-execute the domain command.
+
+**Expected contract direction:** do not require cross-boundary atomicity between R1 receipt persistence and adapter outbox persistence. The adapter's normal path may write its outbox immediately after `APPLIED`, but a separate reconciliation mechanism must make the outbox **eventually complete**.
+
+R1 therefore needs a narrow, read-only, ordered and resumable catch-up view of already accepted decisions (for example, receipts ordered by `trace_sequence`). The adapter can periodically or on startup reconcile that stream against its own outbox and create missing effect intents.
+
+This read path does not grant the adapter authority over protocol semantics. The adapter must not use Repository/Episode reads to decide whether a command is valid, perform version checks, or mutate R1 state. It may consume an append-only stream of decisions that R1 has already made for the sole purpose of recovering its own effect bookkeeping.
+
+The reconciliation cursor and adapter outbox remain adapter-owned durable state. R1 remains unaware of Telegram or other external transport semantics.
+
 ## Additional attack — CONFLICT without Repository read
 
 Current R1 already returns the actual current `episode_version` on `CONFLICT`. The adapter therefore does not need direct Episode access merely to construct a retry.
@@ -142,7 +161,7 @@ Attack:
 9. What happens if the external effect succeeds but the transport acknowledgement is lost or becomes ambiguous?
 10. What happens if the external effect fails after R1 has already committed?
 11. How does adapter recovery retry a pending effect without re-executing the R1 command?
-12. Can the adapter ever call Repository directly? The default adversarial answer should be no.
+12. Can the adapter ever call Repository directly for protocol decisions? The default adversarial answer should be no. Is a narrow read-only reconciliation stream of already accepted decisions the sole allowed persistence read for adapter recovery?
 13. Is `openEpisode()` part of the same adapter contract or a separate lifecycle operation?
 
 ## Non-goals
