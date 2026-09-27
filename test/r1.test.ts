@@ -69,23 +69,29 @@ async function T04_stale_new_command() {
   assert.equal(await repo.getReceipt('t04-stale'), null);
 }
 
-async function T05_composite_transition() {
+async function T05_reconsider_then_change_approach() {
   const repo = new InMemoryRepository();
   const app = new Application(repo, now, id.bind(null, 'event'));
   const episodeId = 'ep-t05';
   await open(app, episodeId);
   await app.execute(command(episodeId, 1, 'START', 't05-start'));
-  await app.execute(command(episodeId, 2, 'STOP', 't05-stop'));
-  const composite = await app.execute(
-    command(episodeId, 3, 'RECONSIDER_AND_CHANGE_APPROACH', 't05-composite'),
-  );
-  assert.equal(composite.status, 'APPLIED');
-  assert.equal(composite.canonical_events.length, 2);
-  assert.deepEqual(composite.canonical_events.map((event) => event.type), ['RECONSIDER', 'CHANGE_APPROACH']);
-  assert.equal(composite.canonical_events[0].command_id, 't05-composite');
-  assert.equal(composite.canonical_events[1].command_id, 't05-composite');
-  assert.equal(composite.canonical_events[0].sequence + 1, composite.canonical_events[1].sequence);
-  assert.equal((await repo.getEpisode(episodeId))?.version, 4);
+  const stop = await app.execute(command(episodeId, 2, 'STOP', 't05-stop'));
+  assert.equal(stop.status, 'APPLIED');
+  assert.equal(stop.canonical_events[0].type, 'STOP');
+
+  const reconsider = await app.execute(command(episodeId, 3, 'RECONSIDER', 't05-reconsider'));
+  assert.equal(reconsider.status, 'APPLIED');
+  assert.equal(reconsider.canonical_events.length, 1);
+  assert.equal(reconsider.canonical_events[0].type, 'RECONSIDER');
+  assert.equal(reconsider.canonical_events[0].command_id, 't05-reconsider');
+
+  const change = await app.execute(command(episodeId, 4, 'CHANGE_APPROACH', 't05-change'));
+  assert.equal(change.status, 'APPLIED');
+  assert.equal(change.canonical_events.length, 1);
+  assert.equal(change.canonical_events[0].type, 'CHANGE_APPROACH');
+  assert.equal(change.canonical_events[0].command_id, 't05-change');
+  assert.equal(change.canonical_events[0].sequence, reconsider.canonical_events[0].sequence + 1);
+  assert.equal((await repo.getEpisode(episodeId))?.version, 5);
 }
 
 async function T06_rejected_attempts_are_ordered_in_raw_trace() {
@@ -288,7 +294,7 @@ async function run() {
     T02_retry_after_commit,
     T03_retry_after_another_command,
     T04_stale_new_command,
-    T05_composite_transition,
+    T05_reconsider_then_change_approach,
     T06_rejected_attempts_are_ordered_in_raw_trace,
     T07_concurrent_retry_and_independent_ordering,
     T08_atomic_rollback_includes_raw_trace,
