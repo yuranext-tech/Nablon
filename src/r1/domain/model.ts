@@ -22,7 +22,6 @@ export type CommandType =
   | 'STOP'
   | 'RECONSIDER'
   | 'CHANGE_APPROACH'
-  | 'RECONSIDER_AND_CHANGE_APPROACH'
   | 'COMPLETE';
 
 export type Command = {
@@ -86,14 +85,6 @@ export function reduce(episode: Episode, command: Command): DomainDecision {
     case 'CHANGE_APPROACH':
       if (episode.state.phase !== 'RECONSIDERING') return reject(episode, 'change_approach_not_allowed');
       return apply(episode, { phase: 'ACTIVE', marker: 'CHANGED_APPROACH' }, [
-        { type: 'CHANGE_APPROACH', payload: {} },
-      ]);
-    case 'RECONSIDER_AND_CHANGE_APPROACH':
-      if (episode.state.marker !== 'STOPPED') {
-        return reject(episode, 'reconsider_and_change_approach_not_allowed');
-      }
-      return apply(episode, { phase: 'ACTIVE', marker: 'CHANGED_APPROACH' }, [
-        { type: 'RECONSIDER', payload: {} },
         { type: 'CHANGE_APPROACH', payload: {} },
       ]);
     case 'COMPLETE':
