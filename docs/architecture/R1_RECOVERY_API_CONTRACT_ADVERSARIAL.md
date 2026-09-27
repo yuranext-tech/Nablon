@@ -75,7 +75,7 @@ If R1 later becomes a network service, or if R1 history gains pruning, or if dom
 
 6. **`scan_limit` independently bounds work.** One call may inspect at most `scan_limit` trace positions satisfying `trace_sequence > cursor`. The call stops when either `limit` APPLIED decisions have been collected or `scan_limit` trace positions have been inspected, whichever occurs first.
 
-7. **`next_cursor` is the scanned boundary, not an acknowledgement.** It identifies the greatest trace position actually inspected by this recovery call. It is not evidence that the adapter has durably captured every required external effect through that position.
+7. **`next_cursor` is the scanned boundary, not an acknowledgement.** It identifies the greatest trace position actually inspected by this recovery call. It is not evidence that the adapter has durably captured every required external effect through that position. The explicit zero-scan case where `cursor > episode.trace_sequence` is an exception: the supplied cursor is preserved as `next_cursor` even though no trace position was inspected.
 
 8. **R1 response cursor and adapter persisted cursor are distinct.** R1 returns `next_cursor`; the adapter persists its own recovery cursor only after it has completed its recovery responsibility for all APPLIED decisions covered by that advancement. In particular, an APPLIED decision must have a durable adapter effect intent before the adapter may persist progress beyond it.
 
@@ -122,7 +122,7 @@ listAppliedSince(
 ): AppliedDecisionBatch
 ```
 
-The exact TypeScript interface and repository signatures are implementation details for the subsequent implementation step.
+The exact TypeScript interface and repository signatures are implementation details for the subsequent implementation step. `limit` and `scan_limit` are positive finite integer bounds; malformed or non-positive values are input errors rather than silently normalized values.
 
 ### Meaning of the bounds
 
