@@ -119,9 +119,12 @@ async function T07_concurrent_retry_and_independent_ordering() {
   const episodeId = 'ep-t07';
   await open(app, episodeId);
 
-  const rejected1 = await app.execute(command(episodeId, 1, 'START', 't07-rejected-1'));
-  const rejected2 = await app.execute(command(episodeId, 1, 'START', 't07-rejected-2'));
-  const applied = await app.execute(command(episodeId, 1, 'START', 't07-applied'));
+  const initial = await app.execute(command(episodeId, 1, 'START', 't07-initial'));
+  assert.equal(initial.status, 'APPLIED');
+
+  const rejected1 = await app.execute(command(episodeId, 2, 'START', 't07-rejected-1'));
+  const rejected2 = await app.execute(command(episodeId, 2, 'START', 't07-rejected-2'));
+  const applied = await app.execute(command(episodeId, 2, 'STOP', 't07-applied'));
   assert.equal(rejected1.status, 'REJECTED');
   assert.equal(rejected2.status, 'REJECTED');
   assert.equal(applied.status, 'APPLIED');
