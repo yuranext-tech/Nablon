@@ -312,7 +312,9 @@ async function T12_completed_episode_has_structural_terminal_barrier() {
 
   for (const type of Object.keys(ALL_COMMAND_TYPES) as Command['type'][]) {
     const decision = reduce(completed, command(episodeId, completed.version, type, `t12-${type}`));
-    assert.equal(decision.kind, 'REJECTED');
+    if (decision.kind !== 'REJECTED') {
+      throw new Error(`expected REJECTED for ${type} on a completed episode`);
+    }
     assert.equal(decision.reason, 'episode_terminal');
     assert.equal(decision.episode === completed, true);
   }
