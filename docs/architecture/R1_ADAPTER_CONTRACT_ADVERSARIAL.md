@@ -51,6 +51,8 @@ Attack:
 
 The persisted receipt remains the source of the replayed ApplicationResult.
 
+**Outbox routing invariant:** `REPLAYED` is transparent to the decision of whether an external effect intent exists. The adapter must not branch on `status === REPLAYED` as if it were a separate effect outcome. It must inspect the effective result represented by the replay: `canonical_events.length > 0` means the original command was `APPLIED` and an outbox intent is required; `canonical_events.length === 0` means the original command produced no canonical event and no outbox intent is required. `REPLAYED` alone does not preserve whether the original result was `APPLIED` or `REJECTED`.
+
 ## Attack 4 — adapter reads or mutates Episode
 
 **Invariant:** the adapter must not read Episode state directly to decide protocol semantics or mutate Episode outside Application. A narrow read-only catch-up stream of already accepted R1 decisions is a separate recovery interface and does not grant protocol authority.
@@ -120,6 +122,20 @@ The exact delivery semantics still need to be specified per transport. In partic
 
 The outbox belongs to the adapter boundary. It must not be added to R1 merely to make external delivery appear atomic with domain persistence.
 
+## Attack 8 — concurrent reconciliation workers
+
+**Invariant:** concurrency on Intake→R1 is already protected by R1 command idempotency; concurrency on R1→Outbox requires an adapter-owned atomic outbox claim.
+
+Attack:
+- run two reconciliation workers concurrently for the same intake;
+- verify that both may safely retry the same `command_id` against R1;
+- then run two workers concurrently against an `APPLIED` decision with no outbox record;
+- verify that at most one worker obtains the right to send the external effect.
+
+The first race needs no new claim mechanism: T07 already demonstrates that repeated execution of the same `command_id` yields one real result and a `REPLAYED` result. The second race is different: two workers can both observe the same `APPLIED` decision before either has created an outbox record. Therefore outbox creation must have an atomic insert-if-absent/unique-ownership step, and only the worker that successfully claims the outbox intent may call `transport.send()`.
+
+The outbox claim protects the race before the external send. It does not resolve an ambiguous transport outcome after a send has begun; that remains the responsibility of the outbox delivery state machine.
+
 ## Attack 9 — loss between APPLIED and effect intent
 
 **Invariant:** every `APPLIED` result that requires an external effect must eventually have a durable adapter effect intent, even if the adapter crashes after receiving `APPLIED` and before writing its own outbox record.
@@ -133,7 +149,7 @@ Attack:
 
 **Expected contract direction:** do not require cross-boundary atomicity between R1 receipt persistence and adapter outbox persistence. The adapter's normal path may write its outbox immediately after `APPLIED`, but a separate reconciliation mechanism must make the outbox **eventually complete**.
 
-R1 therefore needs a narrow, read-only, ordered and resumable catch-up view of already accepted decisions (for example, receipts ordered by `trace_sequence`). The adapter can periodically or on startup reconcile that stream against its own outbox and create missing effect intents.
+R1 therefore needs a narrow, read-only, ordered and resumable catch-up view of already accepted decisions (for example, receipts ordered by `trace_sequence`). The recovery cursor is over the full monotonic `trace_sequence`, not over a filtered APPLIED-only sequence. The stream may return only APPLIED decisions, but the cursor advances according to positions in the underlying full trace. The adapter can periodically or on startup reconcile that stream against its own outbox and create missing effect intents.
 
 This read path does not grant the adapter authority over protocol semantics. The adapter must not use Repository/Episode reads to decide whether a command is valid, perform version checks, or mutate R1 state. It may consume an append-only stream of decisions that R1 has already made for the sole purpose of recovering its own effect bookkeeping.
 
@@ -162,7 +178,10 @@ Attack:
 10. What happens if the external effect fails after R1 has already committed?
 11. How does adapter recovery retry a pending effect without re-executing the R1 command?
 12. Can the adapter ever call Repository directly for protocol decisions? The default adversarial answer should be no. Is a narrow read-only reconciliation stream of already accepted decisions the sole allowed persistence read for adapter recovery?
-13. Is `openEpisode()` part of the same adapter contract or a separate lifecycle operation?
+13. Is `REPLAYED` routed according to its surface status or according to the effective original result? Expected answer: according to `canonical_events`.
+14. Which concurrency races are already covered by R1 command idempotency, and which require adapter-owned claims? Expected answer: Intake→R1 needs no new claim; R1→Outbox requires an atomic outbox claim.
+15. Is the reconciliation cursor defined over the full `trace_sequence` or over a filtered APPLIED sequence? Expected answer: full `trace_sequence`.
+16. Is `openEpisode()` part of the same adapter contract or a separate lifecycle operation?
 
 ## Non-goals
 
