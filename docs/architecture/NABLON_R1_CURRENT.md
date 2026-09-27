@@ -588,4 +588,4 @@ Before handing extraction to implementation, the following must be testable:
 - `Receipt.trace_sequence` and `Receipt.occurred_at` are persisted atomically with Episode/events/receipt.
 - `REJECTED` does not create canonical events and does not increment `Episode.version`; it does advance the raw trace sequence.
 - R1 itself does not decide whether a rejected attempt is behaviorally meaningful.
-- The current executable test file explicitly runs the tests present in the branch. It must not be described as an 11-test suite until T07–T11 are actually present and executed.
+- The acceptance branch `r1-restore-acceptance` restores T07–T11 as executable tests: concurrency + ordering, atomic rollback, external/internal dependency boundaries, canonical Episode creation, and rejected-receipt replay. Their execution still requires a real `npm run r1:test` run; adding the tests is not itself evidence that they pass.
