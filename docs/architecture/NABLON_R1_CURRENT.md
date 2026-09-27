@@ -1,6 +1,6 @@
 # Nablon R1 — текущая архитектура
 
-> Версия: 26 сентября 2026.
+> Версия: 27 сентября 2026.
 >
 > Это текущая консолидированная версия архитектуры R1, собранная из последних решений проекта. Это не дословная копия старого документа Claude.
 
@@ -30,9 +30,12 @@ R1 не зависит от исследовательских гипотез и
 - текущую `version`;
 - `status`;
 - протокольное `state`;
-- последовательность/ссылки на canonical events.
+- последовательность/ссылки на canonical events;
+- `trace_sequence` — монотонный порядковый номер последней зафиксированной попытки команды в raw trace.
 
-Episode хранит только состояние, необходимое для исполнения протокола. Долговременная интерпретация поведения не является его ответственностью.
+`trace_sequence` не является версией протокольного состояния и не используется для optimistic locking. Он нужен только для восстановления порядка сырых попыток.
+
+Episode хранит только состояние, необходимое для исполнения протокола и восстановления raw trace. Долговременная интерпретация поведения не является его ответственностью.
 
 ### Command
 
@@ -48,8 +51,8 @@ Command — намерение изменить состояние Episode.
 Каждая команда:
 1. проверяется относительно текущего состояния;
 2. либо порождает canonical events;
-3. либо отклоняется как технически недопустимая;
-4. получает idempotency receipt.
+3. либо отклоняется как технически/протокольно недопустимая;
+4. получает idempotency receipt, если дошла до исполнения Application.
 
 `command_id` генерируется один раз для пользовательского действия до первой попытки доставки и сохраняется при transport retry. Он не выводится из содержимого команды.
 
@@ -70,21 +73,22 @@ CanonicalEvent — неизменяемая запись фактически п
 
 ## 3. Raw Episode Event Log
 
-Отдельно от canonical state R1 должен сохранять сырой журнал наблюдаемых пользовательских действий и попыток, когда они являются содержательно значимым поведением.
+Raw trace состоит из двух связанных типов фактов:
+- `CanonicalEvent` — принятые протокольные изменения;
+- `Receipt` — зафиксированные попытки команд, включая `REJECTED`.
 
-Ключевой принцип: нельзя сводить журнал сразу к выводу вроде A → B.
+Raw trace не является evidence.
 
-Нужно сохранять последовательность исходных событий, чтобы позже можно было:
+Ключевой принцип: нельзя сводить журнал сразу к выводу вроде A → B. Нужно сохранять последовательность исходных событий и попыток, чтобы позже можно было:
 - переинтерпретировать эпизод;
 - обнаружить составной переход;
 - применить другой классификатор;
-- проверить альтернативную трактовку.
+- проверить альтернативную трактовку;
+- увидеть последовательности вроде `REJECTED → REJECTED → APPLIED`.
 
-Raw log не является доказательством сам по себе.
+R1 не определяет, какие receipt-записи содержательно значимы. Это задача Measurement Layer.
 
-Технические события вроде IllegalTransition не должны автоматически попадать в Raw Episode Log. Они относятся к отдельному техническому аудиту/телеметрии.
-
-При этом содержательная пользовательская попытка может быть записана даже если соответствующая команда впоследствии не прошла доменную валидацию. Граница проходит между техническим отказом и наблюдаемым поведением пользователя, а не просто между accepted/rejected.
+Технические события вроде `IllegalTransition` не становятся raw behavioral event автоматически. Они относятся к отдельному техническому аудиту/телеметрии. При этом receipt доменно отклонённой пользовательской команды сохраняется как факт попытки, если команда дошла до Application и получила `REJECTED`.
 
 ## 4. Candidate
 
@@ -201,14 +205,20 @@ R1 использует idempotency receipt.
 
 ### Receipt
 
-Receipt должен хранить не только факт исполнения, а сериализованный **полный ApplicationResult** исходной команды, включая:
+Receipt хранит не только факт исполнения, а сериализованный **полный ApplicationResult** исходной команды, включая:
 - status;
 - command_id;
 - episode_id;
 - episode_version;
 - canonical_events[].
 
-Поэтому `REPLAYED` может вернуть тот же результат, который получил исходный клиент, а не реконструированный или сокращённый ответ.
+Дополнительно Receipt является частью raw trace и содержит:
+- `trace_sequence` — монотонный порядок попытки внутри Episode;
+- `occurred_at` — время фиксации попытки в R1.
+
+`trace_sequence` относится к raw-attempt sequence, а не к `CanonicalEvent.sequence` и не к `Episode.version`.
+
+Поэтому `REPLAYED` может вернуть тот же результат, который получил исходный клиент, а Measurement Layer при необходимости может восстановить порядок `REJECTED → REJECTED → APPLIED`, не заставляя R1 классифицировать эти попытки.
 
 Receipt входит в ту же атомарную границу, что и изменение Episode и canonical events.
 
@@ -239,6 +249,7 @@ Receipt входит в ту же атомарную границу, что и �
 - state transition;
 - canonical events;
 - idempotency receipt;
+- raw trace sequence;
 - связанным R1-изменениям.
 
 Концептуальная граница операции:
@@ -255,7 +266,7 @@ lock Episode
 
 Ошибки до commit не должны оставлять частично применённое состояние.
 
-Для будущего Postgres Repository атомарность является отдельным acceptance-критерием: Episode, canonical events и receipt должны сохраняться в одной реальной multi-row/multi-table транзакции и завершаться одним `COMMIT`. In-memory rollback не считается доказательством Postgres-атомарности.
+Для будущего Postgres Repository атомарность является отдельным acceptance-критерием: Episode, canonical events, raw trace metadata и receipt должны сохраняться в одной реальной multi-row/multi-table транзакции и завершаться одним `COMMIT`. In-memory rollback не считается доказательством Postgres-атомарности.
 
 ## 12. Application layer
 
@@ -324,6 +335,8 @@ STOP
 
 При этом не каждая внутренняя переменная reducer обязана становиться событием. Критерий — поведенческая/протокольная значимость и возможность последующей реконструкции.
 
+**Текущий статус composite-emission:** reducer технически способен вернуть `EventDraft[]` длиной больше 1, а Application корректно materialize-ит такой массив в последовательные `CanonicalEvent`. Это проверено синтетическим тестом `T05` на одной команде `RECONSIDER_AND_CHANGE_APPROACH`. Это не означает, что вся реальная семантика составных переходов R1 уже исчерпывающе валидирована.
+
 ## 14. Telemetry
 
 Операционная телеметрия должна быть отделена от raw behavioral log.
@@ -335,6 +348,8 @@ STOP
 - processing failure.
 
 Они полезны для эксплуатации и диагностики, но не должны автоматически становиться материалом для Measurement Layer.
+
+Receipt `REJECTED` не является операционной telemetry: это факт command attempt, доступный raw trace. R1 при этом не определяет, является ли эта попытка содержательно значимой.
 
 ## 15. Граница R1 и исследований
 
@@ -545,9 +560,10 @@ lock Episode
 → load Episode
 → version check
 → domain validation/reducer rejection
-→ return ApplicationResult(REJECTED) according to the defined rejection semantics.
+→ persist raw trace sequence + receipt
+→ return ApplicationResult(REJECTED).
 
-`REJECTED` is an окончательный результат конкретного command attempt. Если команда дошла до Application и получила `REJECTED`, receipt сохраняется с полным `ApplicationResult`. Повтор той же команды по тому же `command_id` возвращает `REPLAYED` с тем же сохранённым результатом; команда не исполняется повторно. При этом rejected command не должна создавать domain state change или canonical events, если конкретный command contract явно не определяет иное.
+`REJECTED` is an окончательный результат конкретного command attempt. Если команда дошла до Application и получила `REJECTED`, receipt сохраняется с полным `ApplicationResult`, `trace_sequence` и `occurred_at`. Повтор той же команды по тому же `command_id` возвращает `REPLAYED` с тем же сохранённым результатом; команда не исполняется повторно. При этом rejected command не должна создавать domain state change или canonical events, если конкретный command contract явно не определяет иное.
 
 ## 25. Extraction acceptance invariants
 
@@ -558,8 +574,18 @@ Before handing extraction to implementation, the following must be testable:
 3. **Fresh stale command conflicts:** a new `command_id` with stale `expected_version` returns `CONFLICT` and the current `episode_version`.
 4. **Concurrent retry serialization:** concurrent same-`command_id` calls serialize on the Episode lock; only one applies, the others replay.
 5. **Composite event preservation:** behaviorally meaningful intermediate steps are separate EventDrafts/CanonicalEvents.
-6. **Atomicity:** failed persistence leaves Episode, events, and receipt unchanged.
-7. **Postgres atomicity:** when Postgres Repository is implemented, Episode + events + receipt commit in one real database transaction.
+6. **Atomicity:** failed persistence leaves Episode, events, raw trace sequence, and receipt unchanged.
+7. **Postgres atomicity:** when Postgres Repository is implemented, Episode + events + raw trace sequence + receipt commit in one real database transaction.
 8. **Episode-scoped cutover:** an open legacy Episode never silently changes authority at a wall-clock cutover boundary.
 9. **Shadow isolation:** shadow Episodes/events/receipts are unreachable from production idempotency and Episode reads/writes.
 10. **Single authority:** an Episode is executed by exactly one authoritative protocol path.
+11. **Ordered rejected attempts:** `REJECTED` receipts carry `trace_sequence` and `occurred_at`, allowing Measurement Layer to reconstruct their position relative to later accepted events without R1 classifying them.
+
+## 26. Current implementation status — 27 September 2026
+
+- Composite emission is implemented and tested by `T05`: one command produces two canonical events from one reducer decision.
+- Ordered raw receipt trace is implemented: `Episode.trace_sequence` advances for every executed command attempt that receives `APPLIED` or `REJECTED`.
+- `Receipt.trace_sequence` and `Receipt.occurred_at` are persisted atomically with Episode/events/receipt.
+- `REJECTED` does not create canonical events and does not increment `Episode.version`; it does advance the raw trace sequence.
+- R1 itself does not decide whether a rejected attempt is behaviorally meaningful.
+- The current executable test file explicitly runs the tests present in the branch. It must not be described as an 11-test suite until T07–T11 are actually present and executed.
