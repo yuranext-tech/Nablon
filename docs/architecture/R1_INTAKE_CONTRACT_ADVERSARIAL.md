@@ -36,6 +36,10 @@ The purpose of intake is recovery across failures before and around the R1 call.
 
 R1 does not know Telegram, chat IDs, locale, UI concepts, or external effect types.
 
+### Current topology assumption
+
+The statement that `Application.execute()` does not need an `AMBIGUOUS` intake state is a consequence of the current topology: the adapter calls R1 in-process, synchronously, with an atomic R1 transaction. If R1 ever becomes a separate service across a network boundary, `intake -> R1` acquires the same class of uncertainty that currently exists only at `outbox -> transport`. At that point this contract must be reviewed again; the current in-process property must not be treated as a permanent architectural law.
+
 ## Core invariants
 
 1. **Durable intake precedes R1 execution.** A worker must not call `Application.execute()` until the intake record needed for recovery is durably committed.
@@ -45,7 +49,7 @@ R1 does not know Telegram, chat IDs, locale, UI concepts, or external effect typ
 5. **No-result intake reconciliation gets one semantic retry.** If intake exists but no R1 result is observed, the adapter may retry the same `command_id` once. If that retry returns `REPLAYED`, the adapter must inspect the effective result represented by `canonical_events`.
 6. **`REPLAYED` is transparent for effect routing.** `canonical_events.length > 0` means the original command produced an applied domain transition and therefore requires the R1→outbox path. An empty canonical-event list means no such effect intent exists.
 7. **`CONFLICT` is terminal for that command during reconciliation.** A reconciliation retry that discovers `CONFLICT` confirms that this command did not apply under its original `expected_version`. Automatic recovery must not refresh the version and silently create a new command.
-8. **`AMBIGUOUS` belongs to external delivery only.** It describes uncertainty after an external send/acknowledgement boundary. The in-process R1 call is atomic and therefore does not require an ambiguous intake state.
+8. **`AMBIGUOUS` belongs to external delivery only under the current in-process topology.** It describes uncertainty after an external send/acknowledgement boundary. The current in-process R1 call is atomic and therefore does not require an ambiguous intake state. If R1 becomes a network service, this assumption expires and the intake contract must be reconsidered.
 9. **Intake→R1 concurrency needs no separate claim.** Concurrent retries of the same `command_id` are protected by R1 idempotency; T07 already demonstrates this class of race.
 10. **R1→outbox concurrency does require a claim.** Only the worker that atomically creates/claims the missing outbox intent may call the external transport.
 11. **Recovery cursor follows the full trace.** A recovery stream may filter to `APPLIED` decisions, but its resumable cursor is positioned in the full monotonic `trace_sequence`, including rejected positions.
@@ -116,7 +120,7 @@ The same retry resolves both cases because the retry uses the same `command_id` 
 - Case 1 → real execution.
 - Case 2 → `REPLAYED` with the stored result.
 
-There is no need for an `AMBIGUOUS` intake state because `Application.execute()` is synchronous in-process and its R1 transaction is atomic.
+There is no need for an `AMBIGUOUS` intake state because `Application.execute()` is synchronous in-process and its R1 transaction is atomic **under the current topology assumption**. If that boundary becomes remote, this conclusion no longer holds.
 
 ## Attack 5 — exactly-one retry semantics
 
@@ -266,6 +270,21 @@ Otherwise the adapter cannot distinguish:
 
 The exact `listReceiptsSince()` / `listAppliedSince()` API is intentionally left for the next design step.
 
+## Attack 15 — claim without an outcome
+
+Attack:
+- a reconciliation worker atomically claims an outbox intent;
+- the worker dies before recording any outcome such as `DELIVERED`, `RETRYABLE` or `AMBIGUOUS`;
+- the claim remains present and blocks every later worker indefinitely.
+
+Required mechanism:
+- the claim must carry durable ownership metadata such as `worker_id` and `claimed_at`;
+- a lease/expiry defines how long an uncompleted claim remains owned;
+- after the lease expires, another reconciliation worker may atomically reclaim the intent;
+- a fresh claim must not be confused with `AMBIGUOUS`: `AMBIGUOUS` means a transport attempt occurred but its delivery result is unknown, while an expired claim may mean the transport attempt never began.
+
+The lease protects against a dead claimant, not against uncertain transport acknowledgement. Those remain separate recovery problems.
+
 ## Recovery flows
 
 ### Intake → R1
@@ -328,6 +347,7 @@ Only this second direction needs the explicit adapter-owned claim.
 8. What exact effect identity is used if one R1 decision can eventually produce multiple external effects?
 9. What transport acknowledgement semantics distinguish `DELIVERED`, `RETRYABLE` and `AMBIGUOUS`?
 10. What narrow R1 recovery stream is needed to expose already accepted `APPLIED` decisions while keeping protocol authority inside R1?
+11. What lease duration and reclaim semantics apply to an outbox claim that has no recorded outcome?
 
 ## Non-goals
 
