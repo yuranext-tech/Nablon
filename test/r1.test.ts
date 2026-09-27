@@ -1,12 +1,7 @@
 import { strict as assert } from 'node:assert';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
 import { Application } from '../src/r1/application/application';
 import { InMemoryRepository } from '../src/r1/repository/repository';
-import type { Command, Episode } from '../src/r1/domain/model';
-import type { Repository } from '../src/r1/repository/repository';
-import type { Receipt } from '../src/r1/application/types';
-import type { CanonicalEvent } from '../src/r1/domain/model';
+import type { Command } from '../src/r1/domain/model';
 
 let sequence = 0;
 const id = (prefix: string) => `${prefix}-${++sequence}`;
@@ -97,3 +92,53 @@ async function T05_composite_transition() {
   assert.equal(composite.canonical_events[0].sequence + 1, composite.canonical_events[1].sequence);
   assert.equal((await repo.getEpisode(episodeId))?.version, 4);
 }
+
+async function T06_rejected_attempts_are_ordered_in_raw_trace() {
+  const repo = new InMemoryRepository();
+  const app = new Application(repo, now, id.bind(null, 'event'));
+  const episodeId = 'ep-t06';
+  await open(app, episodeId);
+  await app.execute(command(episodeId, 1, 'START', 't06-start'));
+
+  const firstRejected = await app.execute(command(episodeId, 2, 'START', 't06-rejected-1'));
+  const secondRejected = await app.execute(command(episodeId, 2, 'START', 't06-rejected-2'));
+  const applied = await app.execute(command(episodeId, 2, 'STOP', 't06-applied'));
+
+  assert.equal(firstRejected.status, 'REJECTED');
+  assert.equal(secondRejected.status, 'REJECTED');
+  assert.equal(applied.status, 'APPLIED');
+
+  const firstReceipt = await repo.getReceipt('t06-rejected-1');
+  const secondReceipt = await repo.getReceipt('t06-rejected-2');
+  const appliedReceipt = await repo.getReceipt('t06-applied');
+  assert(firstReceipt);
+  assert(secondReceipt);
+  assert(appliedReceipt);
+
+  assert.deepEqual(
+    [firstReceipt.trace_sequence, secondReceipt.trace_sequence, appliedReceipt.trace_sequence],
+    [3, 4, 5],
+  );
+  assert.equal(firstReceipt.occurred_at, now());
+  assert.equal(secondReceipt.occurred_at, now());
+  assert.equal(appliedReceipt.occurred_at, now());
+  assert.equal((await repo.getEpisode(episodeId))?.trace_sequence, 5);
+}
+
+async function run() {
+  const tests = [
+    T01_new_command,
+    T02_retry_after_commit,
+    T03_retry_after_another_command,
+    T04_stale_new_command,
+    T05_composite_transition,
+    T06_rejected_attempts_are_ordered_in_raw_trace,
+  ];
+  for (const test of tests) await test();
+  console.log(`PASS ${tests.length} R1 tests`);
+}
+
+void run().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
