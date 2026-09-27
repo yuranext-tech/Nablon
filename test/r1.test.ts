@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Application } from '../src/r1/application/application';
 import { InMemoryRepository } from '../src/r1/repository/repository';
+import { reduce } from '../src/r1/domain/model';
 import type { Command } from '../src/r1/domain/model';
 
 let sequence = 0;
@@ -288,6 +289,35 @@ async function T11_rejected_receipt_is_idempotent_and_replayable() {
   assert.equal((await repo.getReceipt('t11-rejected-command'))?.trace_sequence, 3);
 }
 
+async function T12_completed_episode_has_structural_terminal_barrier() {
+  const repo = new InMemoryRepository();
+  const app = new Application(repo, now, id.bind(null, 'event'));
+  const episodeId = 'ep-t12';
+  await open(app, episodeId);
+  await app.execute(command(episodeId, 1, 'START', 't12-start'));
+  await app.execute(command(episodeId, 2, 'COMPLETE', 't12-complete'));
+
+  const completed = await repo.getEpisode(episodeId);
+  assert(completed);
+  assert.equal(completed.status, 'COMPLETED');
+
+  const ALL_COMMAND_TYPES: Record<Command['type'], true> = {
+    OPEN_EPISODE: true,
+    START: true,
+    STOP: true,
+    RECONSIDER: true,
+    CHANGE_APPROACH: true,
+    COMPLETE: true,
+  };
+
+  for (const type of Object.keys(ALL_COMMAND_TYPES) as Command['type'][]) {
+    const decision = reduce(completed, command(episodeId, completed.version, type, `t12-${type}`));
+    assert.equal(decision.kind, 'REJECTED');
+    assert.equal(decision.reason, 'episode_terminal');
+    assert.equal(decision.episode === completed, true);
+  }
+}
+
 async function run() {
   const tests = [
     T01_new_command,
@@ -302,6 +332,7 @@ async function run() {
     T09b_domain_does_not_depend_on_repository,
     T10_episode_creation_has_one_canonical_application_path,
     T11_rejected_receipt_is_idempotent_and_replayable,
+    T12_completed_episode_has_structural_terminal_barrier,
   ];
   for (const test of tests) await test();
   console.log(`PASS ${tests.length} R1 tests`);
