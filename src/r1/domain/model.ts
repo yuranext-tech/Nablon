@@ -64,6 +64,10 @@ export function createInitialEpisode(episodeId: string, userId: string): Episode
 }
 
 export function reduce(episode: Episode, command: Command): DomainDecision {
+  if (episode.status === 'COMPLETED') {
+    return reject(episode, 'episode_terminal');
+  }
+
   switch (command.type) {
     case 'OPEN_EPISODE':
       return reject(episode, 'episode_already_open');
