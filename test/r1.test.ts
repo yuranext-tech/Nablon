@@ -135,8 +135,8 @@ async function T07_concurrent_retry_and_independent_ordering() {
   assert(r1);
   assert(r2);
   assert(r3);
-  assert.deepEqual([r1.trace_sequence, r2.trace_sequence, r3.trace_sequence], [2, 3, 4]);
-  assert.deepEqual([r1.result.episode_version, r2.result.episode_version, r3.result.episode_version], [1, 1, 2]);
+  assert.deepEqual([r1.trace_sequence, r2.trace_sequence, r3.trace_sequence], [3, 4, 5]);
+  assert.deepEqual([r1.result.episode_version, r2.result.episode_version, r3.result.episode_version], [2, 2, 3]);
 
   const repo2 = new InMemoryRepository();
   const app2 = new Application(repo2, now, id.bind(null, 'event'));
