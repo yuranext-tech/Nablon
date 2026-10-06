@@ -4,7 +4,8 @@
   "private": true,
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --check bot.js && node --check index.js && node --check migrate.js && node --check probes.js && node test/nablon-runtime.test.js"
   },
   "dependencies": {
     "telegraf": "^4.16.3",
