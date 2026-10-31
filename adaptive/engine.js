@@ -30,23 +30,38 @@ function selectInterest(s, value) {
 function start(s, id) {
   const ep = { id, scenario_version: VERSION, turns: 0, done: false, result: null,
     phase: id === 'S2' || id === 'S3' ? '1' : 'start', freed: false, known: false,
-    delivery: 'unknown', consequenceDelivery: 'unknown', help: 'none', noProgress: false, checked: false,
+    delivery: 'unknown', consequenceDelivery: 'unknown', help: 'none', noProgress: false, noProgressObserved: false, checked: false,
     continued: false, changed: false, precautionary: false, supported: false, observationUnknown: false };
   s.episodes.push(ep); s.current = ep; emit(s, 'episode_started', { episode: id });
 }
-function presentation(s, kind, delivery) {
-  const ep = active(s);
-  if (!['scenario', 'help', 'consequence'].includes(kind) || !['confirmed', 'unknown'].includes(delivery)) throw Error('invalid delivery');
-  if (kind === 'scenario') ep.delivery = delivery;
-  else if (kind === 'consequence') { if (!ep.turns) throw Error('no consequence'); ep.consequenceDelivery = delivery; }
-  else { if (ep.help !== 'pending') throw Error('help not requested'); ep.help = delivery; }
-  emit(s, 'presentation', { episode: ep.id, kind, delivery });
+function presentation(s, kind, delivery, turn) {
+  if (!['scenario','help','consequence'].includes(kind) || !['confirmed','unknown'].includes(delivery)) throw Error('invalid delivery');
+  const ep = kind === 'consequence' ? s.current : active(s);
+  if (!ep || s.status !== 'active') throw Error('episode not active');
+  if (kind === 'scenario') {
+    if (ep.done || ep.turns !== 0) throw Error('scenario already started');
+    ep.delivery = delivery;
+  } else if (kind === 'help') {
+    if (ep.help !== 'pending') throw Error('help not requested');
+    ep.help = delivery;
+  } else {
+    if (!Number.isInteger(turn) || turn !== ep.turns || turn < 1) throw Error('invalid consequence turn');
+    if (ep.consequenceDelivery !== 'unknown') throw Error('consequence already confirmed');
+    ep.consequenceDelivery = delivery;
+    if (delivery === 'confirmed') {
+      const last = s.events.findLast(x => x.type === 'action' && x.episode === ep.id && x.turn === turn);
+      if (last?.consequence === 'copy_no_progress' || last?.consequence === 'call_failed') ep.noProgressObserved = true;
+    }
+  }
+  emit(s,'presentation',{episode:ep.id,kind,delivery,...(kind==='consequence'?{turn}:{})});
 }
 function active(s) { if (s.status !== 'active' || !s.current || s.current.done) throw Error('episode not active'); return s.current; }
 function help(s) { const e = active(s); if (e.help !== 'none') throw Error('help already requested'); e.help = 'pending'; emit(s, 'help_requested', { episode: e.id }); }
 function act(s, action) {
   const e = active(s); if (!ACTIONS[e.id].includes(action)) throw Error('invalid action');
-  const priorNoProgress = e.noProgress;
+  if (e.delivery !== 'confirmed') throw Error('scenario not confirmed');
+  if (e.help === 'pending') throw Error('help pending');
+  const priorNoProgress = e.noProgressObserved;
   const independentlyObserved = e.delivery === 'confirmed' && e.consequenceDelivery === 'confirmed' && e.help === 'none';
   if (e.turns > 0 && e.consequenceDelivery !== 'confirmed') e.observationUnknown = true;
   e.turns++; let consequence = '', progress = false, success = false, failure = false;
@@ -104,6 +119,14 @@ function restore(serialized) {
     const last = s.episodes[s.episodes.length - 1];
     if (!last || last.id !== s.current.id) throw Error('invalid current episode');
     s.current = last;
+  }
+  if (!['choosing','active','paused','complete'].includes(s.status) || !Array.isArray(s.interests) || !Array.isArray(s.intentions)) throw Error('invalid saved state');
+  for (const e of s.episodes) {
+    if (!ACTIONS[e.id] || !Number.isInteger(e.turns) || e.turns < 0 || e.turns > LIMITS[e.id]) throw Error('invalid episode turns');
+    const acts = s.events.filter(x => x.type === 'action' && x.episode === e.id);
+    if (acts.length !== e.turns || acts.some((x,i) => x.turn !== i+1 || !ACTIONS[e.id].includes(x.action))) throw Error('invalid action history');
+    if (e.done && !['success','failure','limit'].includes(e.result)) throw Error('invalid terminal result');
+    if (!e.done && e.result !== null) throw Error('invalid unfinished result');
   }
   return s;
 }
