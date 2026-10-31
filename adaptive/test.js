@@ -28,7 +28,7 @@ test('exhaustive bounded actions for each scenario',()=>{
     if(id==='S1') initial=begin();
     else if(id==='S2') {initial=begin(); confirm(initial); move(initial,'add'); E.next(initial);}
     else if(id==='S3') initial=throughS2();
-    else { E.next(s,id==='S4B'?'S4B':'S4A'); if(id==='S5'){move(s,'send14'); E.next(s);} initial=s; }
+    else { E.next(s,id==='S4B'?'S4B':'S4A'); if(id==='S5'){confirm(s); move(s,'send14'); E.next(s); confirm(s);} initial=s; }
     function walk(state) {
       const ep=state.current; max=Math.max(max,ep.turns);
       if(ep.done){leaves++; if(ep.result==='success') successes++; return;}
