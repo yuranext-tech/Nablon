@@ -1,0 +1,184 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nablon — личное прохождение</title><style>body{font:17px/1.5 system-ui,sans-serif;max-width:650px;margin:auto;padding:20px;background:#f5f7fa;color:#1b2532}main{background:white;border-radius:16px;padding:24px}h1{margin:0;font-size:27px}button{font:inherit;padding:12px 15px;margin:5px;border:1px solid #a9b5c5;border-radius:10px;background:white}button.primary{background:#173c68;color:white}button:disabled{opacity:.4}#outcome{background:#eaf0f7;padding:16px;border-radius:12px;margin:16px 0}#error{color:#b21a30}small{color:#58697b}details{margin-top:30px}textarea{width:100%;box-sizing:border-box;font:inherit;min-height:90px}</style></head><body><main><h1>Nablon</h1><small>Закрытое личное прохождение. Данные не отправляются на сервер.</small><div id="screen"></div><div id="outcome" hidden></div><div id="actions"></div><p id="error" role="alert"></p><details><summary>Управление прохождением</summary><button id="export">Сохранить журнал</button><button id="reset">Начать заново</button><p><small>Состояние сохраняется только в этом браузере. Не используйте режим инкогнито.</small></p></details></main><script>(function(){const module={exports:{}};'use strict';
+
+// Standalone simulation. State and event history are JSON-serializable.
+const VERSION = 'adaptive-set-v0.1';
+const LIMITS = { S1: 4, S2: 4, S3: 5, S4A: 4, S4B: 4, S5: 5 };
+const ACTIONS = {
+  S1: ['add', 'view'], S2: ['copy', 'settings'],
+  S3: ['copy', 'check', 'delete'],
+  S4A: ['open', 'calendar', 'send12', 'send14'],
+  S4B: ['review', 'send12', 'send14'],
+  S5: ['wait', 'check', 'allow', 'message'],
+};
+const interests = ['planning', 'unknown'];
+function create() {
+  return { version: VERSION, status: 'choosing', current: null, episodes: [], interests: [], intentions: [], events: [] };
+}
+function emit(s, type, payload) { s.events.push({ seq: s.events.length + 1, type, ...payload }); }
+function selectIntention(s, value) {
+  if (!['notice_stalled', 'continue_working', 'unknown'].includes(value)) throw Error('invalid intention');
+  const entry = { id: s.intentions.length + 1, value, previous: s.intentions.at(-1)?.id ?? null };
+  s.intentions.push(entry); emit(s, 'intention_selected', { ...entry });
+}
+function selectInterest(s, value) {
+  if (!interests.includes(value)) throw Error('invalid interest');
+  const previous = s.interests.length ? s.interests[s.interests.length - 1].id : null;
+  const entry = { id: s.interests.length + 1, value, previous };
+  s.interests.push(entry); emit(s, 'interest_selected', { ...entry });
+  if (s.status === 'choosing') { s.status = 'active'; start(s, 'S1'); }
+}
+function start(s, id) {
+  const ep = { id, scenario_version: VERSION, turns: 0, done: false, result: null,
+    phase: id === 'S2' || id === 'S3' ? '1' : 'start', freed: false, known: false,
+    delivery: 'unknown', consequenceDelivery: 'unknown', help: 'none', noProgress: false, noProgressObserved: false, checked: false,
+    continued: false, changed: false, precautionary: false, supported: false, observationUnknown: false };
+  s.episodes.push(ep); s.current = ep; emit(s, 'episode_started', { episode: id });
+}
+function presentation(s, kind, delivery, turn) {
+  if (!['scenario','help','consequence'].includes(kind) || !['confirmed','unknown'].includes(delivery)) throw Error('invalid delivery');
+  const ep = kind === 'consequence' ? s.current : active(s);
+  if (!ep || s.status !== 'active') throw Error('episode not active');
+  if (kind === 'scenario') {
+    if (ep.done || ep.turns !== 0) throw Error('scenario already started');
+    ep.delivery = delivery;
+  } else if (kind === 'help') {
+    if (ep.help !== 'pending') throw Error('help not requested');
+    ep.help = delivery;
+  } else {
+    if (!Number.isInteger(turn) || turn !== ep.turns || turn < 1) throw Error('invalid consequence turn');
+    if (ep.consequenceDelivery !== 'unknown') throw Error('consequence already confirmed');
+    ep.consequenceDelivery = delivery;
+    if (delivery === 'confirmed') {
+      const last = s.events.findLast(x => x.type === 'action' && x.episode === ep.id && x.turn === turn);
+      if (last?.consequence === 'copy_no_progress' || last?.consequence === 'call_failed') ep.noProgressObserved = true;
+    }
+  }
+  emit(s,'presentation',{episode:ep.id,kind,delivery,...(kind==='consequence'?{turn}:{})});
+}
+function active(s) { if (s.status !== 'active' || !s.current || s.current.done) throw Error('episode not active'); return s.current; }
+function help(s) { const e = active(s); if (e.help !== 'none') throw Error('help already requested'); e.help = 'pending'; emit(s, 'help_requested', { episode: e.id }); }
+function act(s, action) {
+  const e = active(s); if (!ACTIONS[e.id].includes(action)) throw Error('invalid action');
+  if (e.delivery !== 'confirmed') throw Error('scenario not confirmed');
+  if (e.help === 'pending') throw Error('help pending');
+  const priorNoProgress = e.noProgressObserved;
+  const independentlyObserved = e.delivery === 'confirmed' && e.consequenceDelivery === 'confirmed' && e.help === 'none';
+  if (e.turns > 0 && e.consequenceDelivery !== 'confirmed') e.observationUnknown = true;
+  e.turns++; let consequence = '', progress = false, success = false, failure = false;
+  if (e.id === 'S1') { success = action === 'add'; consequence = success ? 'address_added' : 'address_missing'; }
+  if (e.id === 'S2') {
+    if (action === 'copy') { progress = true; if (e.phase === '1') { e.phase = '2'; consequence = 'two_of_three'; } else { success = true; consequence = 'three_of_three'; if (independentlyObserved) e.continued = true; } }
+    else consequence = 'count_unchanged';
+  }
+  if (e.id === 'S3') {
+    if (action === 'copy' && e.phase === '1') { e.phase = '2'; progress = true; consequence = 'two_of_three'; }
+    else if (action === 'copy' && e.freed) { success = true; consequence = 'three_of_three'; }
+    else if (action === 'copy') { e.noProgress = true; consequence = 'copy_no_progress'; }
+    else if (action === 'check') { e.checked = true; consequence = e.phase === '1' ? 'one_space_available' : e.freed ? 'space_available' : 'storage_full'; if (e.phase === '2' && !priorNoProgress && independentlyObserved) e.precautionary = true; }
+    else { e.freed = true; consequence = 'draft_deleted'; }
+    if ((action === 'check' || action === 'delete') && priorNoProgress && independentlyObserved) e.changed = true;
+  }
+  if (e.id === 'S4A' || e.id === 'S4B') {
+    if (action === 'send14') { success = true; consequence = 'correct_room_sent'; }
+    else if (action === 'send12') { consequence = 'old_room_sent'; if (e.id === 'S4A') failure = true; }
+    else { if (action === 'open') e.known = true; consequence = action === 'open' || action === 'review' ? 'new_room_14' : 'old_calendar_12'; }
+  }
+  if (e.id === 'S5') {
+    if (action === 'message' || (action === 'wait' && e.freed)) { success = true; consequence = 'delivery_received'; }
+    else if (action === 'wait') { e.noProgress = true; consequence = 'call_failed'; }
+    else if (action === 'check') consequence = e.freed ? 'calls_enabled' : 'calls_blocked';
+    else { e.freed = true; consequence = 'calls_enabled'; }
+    if (priorNoProgress && action !== 'wait' && independentlyObserved) e.changed = true;
+  }
+  if (e.help === 'confirmed' && action) e.supported = true;
+  emit(s, 'action', { episode: e.id, turn: e.turns, action, consequence, help: e.help, delivery: e.delivery });
+  e.consequenceDelivery = 'unknown';
+  if (success || failure || e.turns >= LIMITS[e.id]) { e.done = true; e.result = success ? 'success' : failure ? 'failure' : 'limit'; emit(s, 'episode_finished', { episode: e.id, result: e.result }); }
+}
+function offer(s) {
+  if (s.status !== 'active' || !s.current?.done || s.current.id !== 'S3') throw Error('not at branch');
+  const s2 = s.episodes.find(x => x.id === 'S2'), s3 = s.current;
+  const uncertain = s2.delivery !== 'confirmed' || s3.delivery !== 'confirmed' || s2.observationUnknown || s3.observationUnknown || ['unknown','pending'].includes(s2.help) || ['unknown','pending'].includes(s3.help);
+  const qualified = s2.continued && (s3.changed || s3.precautionary) && s3.result === 'success';
+  // Unknown evidence is neutral: keep ordinary choice available, never force a lower level.
+  return uncertain ? 'choice' : qualified ? 'S4A' : 'S4B';
+}
+function next(s, choice) {
+  if (s.status !== 'active' || !s.current?.done) throw Error('episode not finished');
+  const id = s.current.id;
+  if (id === 'S3') { if (!['S4A','S4B'].includes(choice)) throw Error('explicit branch choice required'); emit(s, 'branch_selected', { offer: offer(s), choice }); start(s, choice); }
+  else if (id === 'S5') { s.current = null; s.status = 'complete'; emit(s, 'set_completed', {}); }
+  else start(s, { S1:'S2', S2:'S3', S4A:'S5', S4B:'S5' }[id]);
+}
+function stop(s) { if (s.status !== 'active') throw Error('not active'); s.status = 'paused'; emit(s, 'paused', {}); }
+function resume(s) { if (s.status !== 'paused') throw Error('not paused'); s.status = 'active'; emit(s, 'resumed', {}); }
+function restore(serialized) {
+  const s = JSON.parse(serialized);
+  if (s.version !== VERSION || !Array.isArray(s.episodes) || !Array.isArray(s.events)) throw Error('invalid saved state');
+  if (s.current) {
+    const last = s.episodes[s.episodes.length - 1];
+    if (!last || last.id !== s.current.id) throw Error('invalid current episode');
+    s.current = last;
+  }
+  if (!['choosing','active','paused','complete'].includes(s.status) || !Array.isArray(s.interests) || !Array.isArray(s.intentions)) throw Error('invalid saved state');
+  for (const e of s.episodes) {
+    if (!ACTIONS[e.id] || !Number.isInteger(e.turns) || e.turns < 0 || e.turns > LIMITS[e.id]) throw Error('invalid episode turns');
+    const acts = s.events.filter(x => x.type === 'action' && x.episode === e.id);
+    if (acts.length !== e.turns || acts.some((x,i) => x.turn !== i+1 || !ACTIONS[e.id].includes(x.action))) throw Error('invalid action history');
+    if (e.done && !['success','failure','limit'].includes(e.result)) throw Error('invalid terminal result');
+    if (!e.done && e.result !== null) throw Error('invalid unfinished result');
+  }
+  return s;
+}
+module.exports = { VERSION, LIMITS, ACTIONS, create, selectInterest, selectIntention, presentation, help, act, offer, next, stop, resume, restore };
+;window.NablonEngine=module.exports;})();(function(){const module={exports:{}};'use strict';
+// Versioned content; identifiers are shared with engine.js.
+module.exports = {
+  version: 'adaptive-set-v0.1',
+  scenarios: {
+    S1: 'Добавь на карточку адрес: ул. Садовая, 8.',
+    S2: 'Готова одна карточка из трёх. Создай остальные.',
+    S3: 'Готова одна карточка из трёх. Подготовь три карточки; доступна проверка сохранения.',
+    S4A: 'В календаре комната 12. Пришло сообщение: место изменилось. Отправь актуальное место.',
+    S4B: 'В старой карточке комната 12. Организатор сообщил: встреча перенесена в комнату 14. Отправь актуальный номер.',
+    S5: 'Курьер дважды пытался позвонить, ответа нет. Получи заказ сегодня.',
+  },
+  consequences: {
+    address_added: 'Адрес добавлен. Цель достигнута.', address_missing: 'Адреса пока нет.',
+    two_of_three: 'Готовы 2 из 3.', three_of_three: 'Готовы 3 из 3. Цель достигнута.',
+    count_unchanged: 'Количество карточек не изменилось.', copy_no_progress: 'Новая карточка не появилась: по-прежнему 2 из 3.',
+    one_space_available: 'Места хватает для одной карточки.', storage_full: 'Хранилище заполнено; можно удалить старый черновик.',
+    space_available: 'Место доступно.', draft_deleted: 'Старый черновик удалён; место освобождено.',
+    correct_room_sent: 'Участники получили актуальный номер: 14.', old_room_sent: 'Отправлен старый номер: 12.',
+    new_room_14: 'Встреча перенесена в комнату 14.', old_calendar_12: 'Календарь показывает 12; он обновлён вчера.',
+    delivery_received: 'Курьер передал заказ.', call_failed: 'Курьер пытался позвонить, ответа нет.',
+    calls_enabled: 'Звонки с неизвестных номеров разрешены.', calls_blocked: 'Звонки с неизвестных номеров отключены.',
+  },
+};
+;window.NablonContent=module.exports;})();(function(){
+const E=window.NablonEngine,C=window.NablonContent,KEY='nablon-owner-v01-state';
+let state=null,stage='intro',feedback='',rawNotes=[];
+const el=id=>document.getElementById(id);
+const set=(id,html)=>{el(id).innerHTML=html};
+const btn=(label,fn,primary=false)=>{const b=document.createElement('button');b.textContent=label;if(primary)b.className='primary';b.onclick=()=>{try{fn();save();render()}catch(e){el('error').textContent='Ошибка: '+e.message}};el('actions').appendChild(b)};
+const save=()=>{if(state)localStorage.setItem(KEY,JSON.stringify({state,stage,feedback,rawNotes}))};
+const safe=(s)=>s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function load(){try{const x=JSON.parse(localStorage.getItem(KEY));if(x){state=E.restore(JSON.stringify(x.state));stage=x.stage;feedback=x.feedback||'';rawNotes=x.rawNotes||[]}}catch(e){el('error').textContent='Сохранение не удалось восстановить. Данные не перезаписаны: '+e.message}}
+function start(){state=E.create();E.selectInterest(state,'unknown');stage='scenario';feedback=''}
+const labels={add:'Добавить адрес',view:'Посмотреть карточку',copy:'Сделать копию',settings:'Открыть настройки',check:'Проверить состояние',delete:'Удалить старый черновик',open:'Открыть сообщение',calendar:'Посмотреть календарь',send12:'Отправить номер 12',send14:'Отправить номер 14',review:'Посмотреть карточку',wait:'Подождать',allow:'Разрешить звонки',message:'Написать курьеру'};
+function action(a){const ep=state.current;E.act(state,a);const ev=state.events.findLast(x=>x.type==='action');E.presentation(state,'consequence','confirmed',ep.turns);feedback=C.consequences[ev.consequence]||ev.consequence;stage='result'}
+function advance(){if(state.current.done){if(state.current.id==='S3'){const offer=E.offer(state);if(offer==='choice'){stage='choose';return}E.next(state,offer)}else E.next(state);if(state.status==='complete'){stage='complete';return}stage='scenario'}else stage='action';feedback=''}
+function render(){el('error').textContent='';el('actions').replaceChildren();el('outcome').hidden=true;
+if(!state){set('screen','<h2>Личное прохождение</h2><p>Вы будете получать небольшие ситуации и выбирать действия. Правильные маршруты заранее не показываются. Можно остановиться в любой момент.</p>');btn('Начать',start,true);return}
+if(stage==='complete'){set('screen','<h2>Прохождение завершено</h2><p>Спасибо. Сохраните журнал, если хотите разобрать прохождение вместе со мной.</p>');return}
+if(stage==='choose'){set('screen','<h2>Продолжение</h2><p>Часть сообщений могла быть не подтверждена. Выберите, как продолжить.</p>');btn('Ситуация с большей неопределённостью',()=>{E.next(state,'S4A');stage='scenario'},true);btn('Более конкретная ситуация',()=>{E.next(state,'S4B');stage='scenario'});return}
+if(stage==='scenario'){set('screen','<h2>Новая ситуация</h2><p>'+safe(C.scenarios[state.current.id])+'</p>');btn('Понятно, начать',()=>{E.presentation(state,'scenario','confirmed');stage='action'},true);return}
+if(stage==='result'){set('screen','<h2>Что произошло</h2>');el('outcome').hidden=false;el('outcome').textContent=feedback;btn(state.current.done?'Продолжить':'Выбрать следующее действие',advance,true);return}
+set('screen','<h2>Ваше действие</h2><p>'+safe(C.scenarios[state.current.id])+'</p>');for(const a of E.ACTIONS[state.current.id])btn(labels[a]||a,()=>action(a),true);
+if(state.current.help==='none')btn('Нужна подсказка',()=>{E.help(state);E.presentation(state,'help','confirmed');feedback='Можно проверить доступную информацию и последствия предыдущих действий.';stage='hint'});
+if(stage==='hint'){set('screen','<h2>Подсказка</h2><p>'+safe(feedback)+'</p>');el('actions').replaceChildren();btn('Продолжить',()=>{stage='action'},true)}
+}
+el('export').onclick=()=>{const payload=JSON.stringify({export_version:1,exported_at:new Date().toISOString(),state,rawNotes},null,2);const u=URL.createObjectURL(new Blob([payload],{type:'application/json'}));const a=document.createElement('a');a.href=u;a.download='nablon-owner-session.json';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000)};
+el('reset').onclick=()=>{if(confirm('Удалить текущий прогресс в этом браузере и начать заново?')){localStorage.removeItem(KEY);state=null;stage='intro';feedback='';render()}};
+load();render();
+})();</script></body></html>
