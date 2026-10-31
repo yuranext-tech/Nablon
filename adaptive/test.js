@@ -26,7 +26,7 @@ test('exhaustive bounded actions for each scenario',()=>{
     const s=throughS2(); ['copy','check','delete','copy'].forEach(a=>move(s,a));
     let initial;
     if(id==='S1') initial=begin();
-    else if(id==='S2') {initial=begin(); move(initial,'add'); E.next(initial);}
+    else if(id==='S2') {initial=begin(); confirm(initial); move(initial,'add'); E.next(initial);}
     else if(id==='S3') initial=throughS2();
     else { E.next(s,id==='S4B'?'S4B':'S4A'); if(id==='S5'){move(s,'send14'); E.next(s);} initial=s; }
     function walk(state) {
