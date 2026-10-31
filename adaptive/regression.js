@@ -12,6 +12,6 @@ test('pending help blocks action',()=>{const s=begin();E.help(s);assert.throws((
 test('acknowledgement must match turn',()=>{const s=s3();E.act(s,'copy');assert.throws(()=>E.presentation(s,'consequence','confirmed',2),/invalid consequence turn/)});
 test('consequence cannot be acknowledged before action',()=>{const s=begin();assert.throws(()=>E.presentation(s,'consequence','confirmed',1),/invalid consequence turn/)});
 test('restore rejects invalid turn count',()=>{const s=s3();move(s,'copy');const bad=JSON.parse(JSON.stringify(s));bad.current.turns=100;bad.episodes.at(-1).turns=100;assert.throws(()=>E.restore(JSON.stringify(bad)),/invalid episode turns/)});
-test('unseen failure does not establish independent switch',()=>{const s=s3();move(s,'copy');move(s,'copy','unknown');move(s,'check');assert.equal(s.current.changed,false);assert.equal(E.offer(s),'choice')});
+test('unseen failure does not establish independent switch',()=>{const s=s3();move(s,'copy');move(s,'copy','unknown');move(s,'check');assert.equal(s.current.changed,false);move(s,'delete');move(s,'copy');assert.equal(E.offer(s),'choice')});
 test('confirmed failure permits independent switch',()=>{const s=s3();move(s,'copy');move(s,'copy');move(s,'check');assert.equal(s.current.changed,true)});
 console.log('PASS '+n+' regression tests');
