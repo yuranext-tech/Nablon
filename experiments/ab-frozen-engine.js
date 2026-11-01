@@ -9,7 +9,7 @@ const WORLDS = Object.freeze({
 });
 function start(world) {
   if (!Object.hasOwn(WORLDS, world)) throw new Error('invalid_world');
-  return { world, steps: 0, retries: 0, indicator: 2, status: 'ACTIVE', outcome: null, events: [] };
+  return { world, steps: 0, retries: 0, indicator: world === 'C' ? 1 : 2, status: 'ACTIVE', outcome: null, events: [] };
 }
 function transition(state, action, text = null) {
   if (!state || !Object.hasOwn(WORLDS, state.world)) throw new Error('invalid_state');
