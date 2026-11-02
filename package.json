@@ -4,7 +4,8 @@
   "private": true,
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node test/debug-removed.test.js"
   },
   "dependencies": {
     "telegraf": "^4.16.3",
