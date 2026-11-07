@@ -5,9 +5,14 @@
 const { Telegraf } = require('telegraf');
 const { Pool } = require('pg');
 const { PROBES } = require('./probes');
+const { TrySceneManager } = require('./try_scene');
+const { registerTrySceneHandlers } = require('./try_scene_telegram');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const tryScenes = new TrySceneManager();
+
+registerTrySceneHandlers(bot, tryScenes);
 
 // Приветствие после /start — не привязано к конкретному зонду, отправляется один раз при регистрации.
 const WELCOME_TEXT =
@@ -335,4 +340,4 @@ async function dailyCronTick() {
   }
 }
 
-module.exports = { bot, dailyCronTick, nextAction, pickNextProbe, sendProbe, sendEveningCheckin, computeProbeClarityScore, pool };
+module.exports = { bot, dailyCronTick, nextAction, pickNextProbe, sendProbe, sendEveningCheckin, computeProbeClarityScore, pool, tryScenes };
