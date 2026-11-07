@@ -10,23 +10,15 @@ http
   .createServer(async (req, res) => {
     const parsed = url.parse(req.url, true);
 
+    // Retired: /debug previously exposed private data using BOT_TOKEN in a URL.
+    // Return 404 without querying the database or inspecting URL secrets.
     if (parsed.pathname === '/debug') {
-      if (parsed.query.key !== process.env.BOT_TOKEN) {
-        res.writeHead(403, { 'Content-Type': 'text/plain' });
-        res.end('forbidden');
-        return;
-      }
-      try {
-        const users = await pool.query(
-          'SELECT id, telegram_id, last_active_at FROM users ORDER BY id DESC LIMIT 100'
-        );
-        const sessions = await pool.query(
-          'SELECT id, user_id, training_id, mode, current_episode_index, status, started_at, completed_at FROM nablon_sessions ORDER BY started_at DESC LIMIT 50'
-        );
-        const events = await pool.query(
-          'SELECT id, user_id, session_id, episode_id, event_name, turn_index, payload, created_at FROM nablon_events ORDER BY created_at DESC LIMIT 100'
-        );
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ users: users.rows, sessions: sessions.rows, events: events.rows }, null, 2));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'text/plain' });
