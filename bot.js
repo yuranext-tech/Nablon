@@ -6,37 +6,13 @@ const { Telegraf } = require('telegraf');
 const { Pool } = require('pg');
 const { PROBES } = require('./probes');
 const { TrySceneManager } = require('./try_scene');
+const { registerTrySceneHandlers } = require('./try_scene_telegram');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const tryScenes = new TrySceneManager();
 
-function inlineKeyboard(buttonRows) {
-  return { reply_markup: { inline_keyboard: buttonRows } };
-}
-
-bot.command('try', async (ctx) => {
-  const scene = tryScenes.start(ctx.from.id);
-  await ctx.reply(scene.message, inlineKeyboard(scene.buttons));
-});
-
-bot.on('callback_query', async (ctx) => {
-  const callback = ctx.callbackQuery;
-  const result = tryScenes.handle(ctx.from.id, callback.data, callback.id);
-  if (!result.handled) return;
-
-  await ctx.answerCbQuery(result.status === 'APPLIED' ? undefined : result.message, {
-    show_alert: result.status !== 'APPLIED',
-  });
-  if (result.status !== 'APPLIED') return;
-  try {
-    await ctx.editMessageText(result.message, inlineKeyboard(result.buttons));
-  } catch (err) {
-    // Состояние уже атомарно принято в памяти; старая Telegram-кнопка всё равно
-    // будет отвергнута по turn/token. Не пробуем исполнять действие повторно.
-    console.error('try scene message update failed:', err.message);
-  }
-});
+registerTrySceneHandlers(bot, tryScenes);
 
 // Приветствие после /start — не привязано к конкретному зонду, отправляется один раз при регистрации.
 const WELCOME_TEXT =
