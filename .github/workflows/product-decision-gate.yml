@@ -1,0 +1,38 @@
+name: Product decision gate
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [main]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  decision-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require decision evidence for product changes
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename')
+          if ! printf '%s\n' "$files" | grep -Eq '(^try_scene\.js$|^index\.js$|^lib/|^src/|^scenarios/|^experiments/|^docs/architecture/|^docs/scenarios/)'; then
+            echo "No product-sensitive files changed"; exit 0
+          fi
+          echo "Product-sensitive change: checking PR evidence"
+          for heading in "Основание изменения" "Проверка соответствия" "Противоречия и отклонения" "Проверяющий"; do
+            if ! grep -Fq "$heading" <<< "$PR_BODY"; then
+              echo "::error::Missing PR section: $heading"; exit 1
+            fi
+          done
+          if ! grep -Eq 'https://github.com/|docs/architecture/|docs/DECISION_GATE.md' <<< "$PR_BODY"; then
+            echo "::error::Missing approved source link"; exit 1
+          fi
+          if grep -Eq '(^|[[:space:]])- \[ \]' <<< "$PR_BODY"; then
+            echo "::error::Unchecked review items remain"; exit 1
+          fi
+          echo "PR evidence supplied. Human quality assessment and branch protection still required."
