@@ -35,19 +35,29 @@ async function main() {
     console.log('Try-only Telegram polling requested');
     // Telegraf launch() runs the polling loop until shutdown, so awaiting it
     // would suppress the success log for the entire life of a healthy bot.
-    bot.launch().then(() => {
-      console.log('Try-only Telegram polling stopped');
-    }).catch((err) => {
-      console.error('Try-only Telegram polling failed:', err.message);
-    });
+    let stopping = false;
+    let retryTimer = null;
+    let attempts = 0;
+    function launchPolling() {
+      if (stopping) return;
+      attempts += 1;
+      console.log('Try-only Telegram polling attempt', attempts);
+      bot.launch().then(() => {
+        if (!stopping) console.error('Try-only Telegram polling stopped unexpectedly');
+      }).catch((err) => {
+        console.error('Try-only Telegram polling failed:', err.message);
+        if (!stopping) retryTimer = setTimeout(launchPolling, 15000);
+      });
+    }
+    launchPolling();
+    process.once('SIGINT', () => { stopping = true; clearTimeout(retryTimer); bot.stop('SIGINT'); });
+    process.once('SIGTERM', () => { stopping = true; clearTimeout(retryTimer); bot.stop('SIGTERM'); });
   } catch (err) {
     console.error('Try-only Telegram startup failed:', err.message);
     server.close();
     process.exitCode = 1;
     return;
   }
-  process.once('SIGINT', () => bot.stop('SIGINT'));
-  process.once('SIGTERM', () => bot.stop('SIGTERM'));
 }
 
 if (require.main === module) {
