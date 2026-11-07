@@ -10,20 +10,9 @@ http
   .createServer(async (req, res) => {
     const parsed = url.parse(req.url, true);
 
-    // Retired: /debug previously exposed private data using BOT_TOKEN in a URL.
-    // Return 404 without querying the database or inspecting URL secrets.
     if (parsed.pathname === '/debug') {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('not found');
-      return;
-    }
-
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ users: users.rows, sessions: sessions.rows, events: events.rows }, null, 2));
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
-        res.end('error: ' + err.message);
-      }
       return;
     }
 
