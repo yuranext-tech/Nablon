@@ -20,9 +20,9 @@ test('first deterministic scene progresses when the action is repeated', () => {
   assert.equal(first.situation, 'repeat_progress');
   const repeated = scenes.handle(101, button(first, 'Повторить действие'), 'callback-1');
   assert.equal(repeated.status, 'APPLIED');
-  assert.match(repeated.message, /два нужных пункта нашлись/);
+  assert.match(repeated.message, /Оставшиеся коробки доставлены/);
   const result = scenes.handle(101, button(repeated, 'Узнать результат'), 'callback-2');
-  assert.match(result.message, /повторение того же действия помогло/);
+  assert.match(result.message, /привычный способ уже давал прогресс/);
   assert.deepEqual(scenes.anonymousEvents(), [{
     type: 'try_action', situation: 'repeat_progress', action: 'repeat', outcome: 'progress',
   }]);
@@ -34,11 +34,11 @@ test('second deterministic scene needs a changed approach for progress', () => {
   const second = scenes.start(101);
   assert.equal(second.situation, 'change_progress');
   const repeated = scenes.handle(101, button(second, 'Повторить действие'), 'callback-1');
-  assert.match(repeated.message, /нового результата нет/);
+  assert.match(repeated.message, /Ничего не изменилось/);
   const changed = scenes.handle(101, button(repeated, 'Изменить способ'), 'callback-2');
-  assert.match(changed.message, /Смена способа дала прогресс/);
+  assert.match(changed.message, /Отправка подтверждена/);
   const result = scenes.handle(101, button(changed, 'Узнать результат'), 'callback-3');
-  assert.match(result.message, /смена способа помогла/);
+  assert.match(result.message, /устранил указанную причину ошибки/);
   assert.deepEqual(scenes.anonymousEvents().map(({ action, outcome }) => ({ action, outcome })), [
     { action: 'repeat', outcome: 'no_progress' },
     { action: 'change', outcome: 'progress' },
@@ -68,6 +68,7 @@ test('a repeat /try invalidates the old scene and alternates the situation', () 
   const first = scenes.start(101);
   const second = scenes.start(101);
   assert.equal(second.situation, 'change_progress');
+  assert.equal(scenes.sessions.size, 1, 'replaced sessions must not accumulate');
   assert.equal(scenes.handle(101, button(first, 'Завершить'), 'old-callback').status, 'STALE');
   assert.equal(scenes.handle(101, button(second, 'Завершить'), 'new-callback').terminal, true);
 });
