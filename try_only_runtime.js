@@ -14,6 +14,10 @@ async function main() {
     throw new Error('BOT_TOKEN is required');
   }
   const bot = new Telegraf(process.env.BOT_TOKEN);
+  bot.use(async (ctx, next) => {
+    console.log('Try-only incoming Telegram update:', ctx.updateType);
+    return next();
+  });
   registerTrySceneHandlers(bot, new TrySceneManager());
   bot.start(async (ctx) => {
     await ctx.reply('Это временная проверка Nablon. Сейчас доступна только команда /try. Старый цикл прогнозов отключён.');
@@ -25,9 +29,17 @@ async function main() {
   console.log('Try-only health server listening on port', port);
   try {
     // Do not drop pending Telegram messages; the old mode is intentionally disabled.
+    const identity = await bot.telegram.getMe();
+    console.log('Try-only Telegram identity:', '@' + identity.username);
     await bot.telegram.deleteWebhook({ drop_pending_updates: false });
-    await bot.launch();
-    console.log('Try-only Telegram polling started');
+    console.log('Try-only Telegram polling requested');
+    // Telegraf launch() runs the polling loop until shutdown, so awaiting it
+    // would suppress the success log for the entire life of a healthy bot.
+    bot.launch().then(() => {
+      console.log('Try-only Telegram polling stopped');
+    }).catch((err) => {
+      console.error('Try-only Telegram polling failed:', err.message);
+    });
   } catch (err) {
     console.error('Try-only Telegram startup failed:', err.message);
     server.close();
