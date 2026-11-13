@@ -25,3 +25,13 @@ CREATE TABLE IF NOT EXISTS nablon_orientation_receipts (
   result jsonb NOT NULL,
   PRIMARY KEY (owner_ref, command_id)
 );
+
+-- A successful Telegram API response is separate from episode events and user actions.
+CREATE TABLE IF NOT EXISTS nablon_orientation_telegram_sends (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  episode_id uuid NOT NULL REFERENCES nablon_orientation_episodes(id),
+  episode_version integer NOT NULL CHECK (episode_version >= 1),
+  command_id text NOT NULL,
+  method text NOT NULL CHECK (method IN ('edit', 'reply')),
+  acknowledged_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);

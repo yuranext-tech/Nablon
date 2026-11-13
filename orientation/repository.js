@@ -16,9 +16,14 @@ function createRepository(pool) {
       let result;
       if (receipt.rowCount) {
         const previous = receipt.rows[0];
-        result = isDeepStrictEqual(previous.request, request)
-          ? { ...previous.result, status: 'REPLAYED', originalStatus: previous.result.status }
-          : { status: 'CONFLICT' };
+        if (!isDeepStrictEqual(previous.request, request)) {
+          result = { status: 'CONFLICT' };
+        } else {
+          result = { ...previous.result, status: 'REPLAYED', originalStatus: previous.result.status };
+          if (previous.result.episode) {
+            result.presentation = await findEpisode(client, owner, previous.result.episode.id);
+          }
+        }
       } else {
         result = await apply(client, owner, commandId, request);
         await client.query(
@@ -36,17 +41,43 @@ function createRepository(pool) {
     }
   }
 
+  function snapshot(row) {
+    return { id: row.id, version: row.version, state: row.state };
+  }
+
+  async function findEpisode(client, owner, episodeId) {
+    const { rows } = await client.query(
+      'SELECT * FROM nablon_orientation_episodes WHERE owner_ref=$1 AND id=$2', [owner, episodeId],
+    );
+    return rows[0] ?? null;
+  }
+
   async function apply(client, owner, commandId, request) {
-    const lookup = request.episodeId
-      ? await client.query('SELECT * FROM nablon_orientation_episodes WHERE owner_ref=$1 AND id=$2', [owner, request.episodeId])
-      : await client.query('SELECT * FROM nablon_orientation_episodes WHERE owner_ref=$1 AND active', [owner]);
-    const previous = lookup.rows[0];
-    if (request.action === 'start' && previous) {
-      return { status: 'RESUMED', episode: { id: previous.id, version: previous.version, state: previous.state } };
+    const { action, episodeId } = request;
+    let previous;
+    if (episodeId) {
+      previous = await findEpisode(client, owner, episodeId);
+    } else {
+      const active = await client.query('SELECT * FROM nablon_orientation_episodes WHERE owner_ref=$1 AND active', [owner]);
+      previous = active.rows[0];
+      if (action === 'start' && !previous) {
+        const last = await client.query(
+          `SELECT e.* FROM nablon_orientation_episodes e
+           JOIN nablon_orientation_events opened ON opened.episode_id=e.id AND opened.sequence=1
+           WHERE e.owner_ref=$1 ORDER BY opened.occurred_at DESC, e.id DESC LIMIT 1`,
+          [owner],
+        );
+        previous = last.rows[0];
+      }
+    }
+
+    const opening = action === 'start' || action === 'restart';
+    if (opening && previous) {
+      return { status: 'RESUMED', episode: snapshot(previous) };
     }
 
     let episode, events;
-    if (request.action === 'start') {
+    if (opening) {
       episode = { id: randomUUID(), version: 1, state: initialState() };
       events = [
         { type: 'EPISODE_OPENED', sceneVersion: VERSION },
@@ -57,10 +88,11 @@ function createRepository(pool) {
         [episode.id, owner, episode.version, episode.state],
       );
     } else {
-      if (!previous || !previous.active) return { status: 'REJECTED' };
-      if (request.episodeId && request.version !== previous.version) {
-        return { status: 'CONFLICT', version: previous.version };
+      if (!previous) return { status: 'REJECTED' };
+      if (episodeId && (!previous.active || request.version !== previous.version)) {
+        return { status: 'CONFLICT', version: previous.version, episode: snapshot(previous) };
       }
+      if (!previous.active) return { status: 'REJECTED' };
       const change = advance(previous.state, request.action, previous.version);
       if (!change) return { status: 'REJECTED' };
       episode = { id: previous.id, version: previous.version + 1, state: change.state };
@@ -90,7 +122,15 @@ function createRepository(pool) {
     return { status: 'APPLIED', episode, canonicalEvents };
   }
 
-  return { execute };
+  async function recordSent(owner, episode, commandId, method) {
+    await pool.query(
+      `INSERT INTO nablon_orientation_telegram_sends(episode_id,episode_version,command_id,method)
+       SELECT id,$3,$4,$5 FROM nablon_orientation_episodes WHERE owner_ref=$1 AND id=$2`,
+      [owner, episode.id, episode.version, commandId, method],
+    );
+  }
+
+  return { execute, recordSent };
 }
 
 module.exports = { createRepository };

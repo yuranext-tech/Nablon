@@ -10,30 +10,50 @@ function registerOrientation(bot, repository, secret) {
 
   async function handle(ctx, request, callback = false) {
     if (!available(ctx)) return;
+    const subject = owner(ctx);
+    const commandId = String(ctx.update.update_id);
     let result;
     try {
-      result = await repository.execute(owner(ctx), String(ctx.update.update_id), request);
+      result = await repository.execute(subject, commandId, request);
     } catch {
       await ctx.reply('Не удалось подтвердить ход. Нажми ту же кнопку ещё раз или открой /try.');
       return;
     }
     if (callback) await ctx.answerCbQuery().catch(() => {});
-    if (result.status === 'REPLAYED') return;
-    if (!result.episode) {
+    const episode = result.presentation ?? result.episode;
+    if (!episode) {
       await ctx.reply('Этот ход больше недоступен. Открой /try, чтобы продолжить.');
       return;
     }
-    const view = screen(result.episode, result.episode.state.helpPending);
+    const view = screen(episode, episode.state.helpPending);
+    const markup = options(view);
+    let method;
     if (callback) {
       try {
-        await ctx.editMessageText(view.message, options(view));
-        return;
-      } catch { /* Show the committed result if the original message cannot be edited. */ }
+        await ctx.editMessageText(view.message, markup);
+        method = 'edit';
+      } catch { /* Try a new message if editing did not succeed. */ }
     }
-    await ctx.reply(view.message, options(view));
+    if (!method) {
+      try {
+        await ctx.reply(view.message, markup);
+        method = 'reply';
+      } catch {
+        // The committed result is still available through /try or a button retry.
+        console.error('orientation: Telegram presentation failed');
+        return;
+      }
+    }
+    try {
+      await repository.recordSent(subject, episode, commandId, method);
+    } catch {
+      // A failure to record an acknowledgement must not trigger another send.
+      console.error('orientation: could not record Telegram acknowledgement');
+    }
   }
 
   bot.command('try', (ctx) => handle(ctx, { action: 'start' }));
+  bot.command('try_again', (ctx) => handle(ctx, { action: 'restart' }));
   bot.command('help', (ctx) => handle(ctx, { action: 'help' }));
   bot.on('callback_query', (ctx) => {
     const match = /^o1:([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}):([1-9][0-9]{0,8}):(open|old|latest|finish)$/.exec(ctx.callbackQuery?.data ?? '');

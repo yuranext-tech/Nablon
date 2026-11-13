@@ -4,6 +4,9 @@ const { randomInt, randomUUID } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { Pool } = require('pg');
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
+const run = promisify(execFile);
 const { initialState, advance, screen, INTRO } = require('../orientation/episode');
 const { createRepository } = require('../orientation/repository');
 const { registerOrientation } = require('../orientation/telegram');
@@ -48,7 +51,7 @@ test('isolated PostgreSQL and synthetic Telegram end to end', { skip: !url && 'S
   const { rows: [db] } = await pool.query('SELECT version()');
   t.diagnostic(db.version);
 
-  function telegram(repository) {
+  function telegram(repository, fail = false) {
     const handlers = {};
     registerOrientation({
       command(name, fn) { handlers[name] = fn; },
@@ -56,10 +59,13 @@ test('isolated PostgreSQL and synthetic Telegram end to end', { skip: !url && 'S
     }, repository, 'synthetic-test-key');
     return async (event, updateId, data, user = 100) => {
       const messages = [];
-      const present = async (message, options) => { messages.push({ message, options }); };
+      const present = (method) => async (message, options) => {
+        if (fail === true || fail === method) throw new Error('synthetic Telegram failure');
+        messages.push({ message, options });
+      };
       await handlers[event]({
         from: { id: user }, chat: { type: 'private' }, update: { update_id: updateId },
-        callbackQuery: { data }, reply: present, editMessageText: present, answerCbQuery: async () => {},
+        callbackQuery: { data }, reply: present('reply'), editMessageText: present('edit'), answerCbQuery: async () => {},
       });
       return messages[0];
     };
@@ -86,7 +92,7 @@ test('isolated PostgreSQL and synthetic Telegram end to end', { skip: !url && 'S
     assert.match(foreign.message, /больше недоступен/);
     const outcome = await after('callback_query', 5, old, user);
     assert.match(outcome.message, /более свежий/);
-    assert.equal(await after('callback_query', 5, old, user), undefined);
+    assert.deepEqual(await after('callback_query', 5, old, user), outcome);
     const episodeId = open.split(':')[1];
     const { rows } = await pool.query(
       'SELECT fact FROM nablon_orientation_events WHERE episode_id=$1 ORDER BY sequence', [episodeId],
@@ -97,6 +103,98 @@ test('isolated PostgreSQL and synthetic Telegram end to end', { skip: !url && 'S
     ]);
     assert.equal(rows[4].fact.precedingVersion, 2);
     assert.equal(rows[5].fact.result, 'confirmed');
+  });
+
+  await t.test('failed Telegram send leaves the prepared result recoverable on replay and fresh button retries', async () => {
+    const user = randomInt(10_000_000, 10_000_000_000);
+    const initial = await telegram(createRepository(pool))('try', 1, null, user);
+    const open = button(initial, 'Открыть папку');
+    const episodeId = open.split(':')[1];
+    assert.equal(await telegram(createRepository(pool), true)('callback_query', 2, open, user), undefined);
+    const sent = () => pool.query(
+      'SELECT episode_version, method FROM nablon_orientation_telegram_sends WHERE episode_id=$1 ORDER BY id',
+      [episodeId],
+    ).then(({ rows }) => rows);
+    assert.deepEqual(await sent(), [{ episode_version: 1, method: 'reply' }]);
+    const recovered = telegram(createRepository(pool));
+    const files = await recovered('callback_query', 2, open, user);
+    assert.match(files.message, /два файла/);
+    assert.deepEqual(await telegram(createRepository(pool), 'edit')('callback_query', 3, open, user), files);
+    assert.deepEqual(await sent(), [
+      { episode_version: 1, method: 'reply' }, { episode_version: 2, method: 'edit' },
+      { episode_version: 2, method: 'reply' },
+    ]);
+    const { rows } = await pool.query(
+      'SELECT fact FROM nablon_orientation_events WHERE episode_id=$1 ORDER BY sequence', [episodeId],
+    );
+    assert.deepEqual(rows.map((row) => row.fact.type),
+      ['EPISODE_OPENED', 'SCENARIO_PREPARED', 'ACTION_ACCEPTED', 'CONSEQUENCE_PREPARED']);
+  });
+
+  await t.test('lost final message is recovered through /try in a fresh process without opening an episode', async () => {
+    const user = randomInt(10_000_000, 10_000_000_000);
+    const before = telegram(createRepository(pool));
+    const intro = await before('try', 1, null, user);
+    const open = button(intro, 'Открыть папку');
+    const files = await before('callback_query', 2, open, user);
+    const latest = button(files, 'Открыть от 14 ноября');
+    const id = latest.split(':')[1];
+    assert.equal(await telegram(createRepository(pool), true)('callback_query', 3, latest, user), undefined);
+    const script = `
+      const { Pool } = require('pg');
+      const { registerOrientation } = require('./orientation/telegram');
+      const { createRepository } = require('./orientation/repository');
+      const pool = new Pool({ connectionString: process.env.NABLON_ORIENTATION_TEST_DATABASE_URL });
+      const handlers = {};
+      registerOrientation({
+        command(name, handler) { handlers[name] = handler; },
+        on() {},
+      }, createRepository(pool), 'synthetic-test-key');
+      handlers.try({
+        chat: { type: 'private' }, from: { id: Number(process.argv[1]) }, update: { update_id: 4 },
+        reply: async (message) => process.stdout.write(message),
+      }).finally(() => pool.end());
+    `;
+    const child = await run(process.execPath, ['-e', script, String(user)], { cwd: join(__dirname, '..') });
+    assert.match(child.stdout, /Это последняя версия/);
+    const { rows } = await pool.query(
+      'SELECT id, version, active, state FROM nablon_orientation_episodes WHERE owner_ref=(SELECT owner_ref FROM nablon_orientation_episodes WHERE id=$1)',
+      [id],
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, id);
+    assert.equal(rows[0].version, 3);
+    assert.equal(rows[0].active, false);
+    assert.equal(rows[0].state.goal, 'reached');
+    const lateReplay = await before('callback_query', 2, open, user);
+    assert.match(lateReplay.message, /Это последняя версия/);
+    assert.deepEqual(lateReplay.options.reply_markup.inline_keyboard, []);
+    const reopened = await before('try_again', 5, null, user);
+    assert.notEqual(button(reopened, 'Открыть папку').split(':')[1], id);
+  });
+
+  await t.test('/help finds the active episode and records each distinct request once', async () => {
+    const user = randomInt(10_000_000, 10_000_000_000);
+    const after = telegram(createRepository(pool));
+    const outsideEpisode = await after('help', 0, null, user);
+    assert.ok(outsideEpisode.message.includes('Открой /try'));
+    const intro = await after('try', 1, null, user);
+    const open = button(intro, 'Открыть папку');
+    await after('callback_query', 2, open, user);
+    const helped = await after('help', 3, null, user);
+    assert.match(helped.message, /^Нажми кнопку с действием/);
+    assert.deepEqual(await after('help', 3, null, user), helped);
+    const helpedAgain = await after('help', 4, null, user);
+    assert.equal(helpedAgain.message, helped.message);
+    const old = button(helpedAgain, 'Открыть от 12 ноября');
+    await after('callback_query', 5, old, user);
+    const { rows } = await pool.query(
+      'SELECT fact FROM nablon_orientation_events WHERE episode_id=$1 ORDER BY sequence', [open.split(':')[1]],
+    );
+    assert.equal(rows.filter((row) => row.fact.type === 'HELP_REQUESTED').length, 2);
+    assert.equal(rows.filter((row) => row.fact.type === 'HELP_PREPARED').length, 2);
+    assert.equal(rows.find((row) => row.fact.type === 'INTERFACE_CHECK_RECORDED').fact.result, 'assisted');
+    assert.equal(rows.filter((row) => row.fact.type === 'ACTION_ACCEPTED').length, 2);
   });
 
   await t.test('concurrent identical commands replay and changed input conflicts', async () => {
