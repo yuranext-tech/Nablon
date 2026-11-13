@@ -1,4 +1,4 @@
-// Temporary isolated Telegram pilot. No PostgreSQL, migrations, numeric probes or cron.
+// Isolated Telegram pilot. The orientation option uses its own R1 store.
 // Enable only by setting NABLON_RUNTIME_MODE=try-only on the Render service.
 // In-memory sessions are intentionally lost when the service restarts.
 const { Telegraf } = require('telegraf');
@@ -18,7 +18,10 @@ async function main() {
     console.log('Try-only incoming Telegram update:', ctx.updateType);
     return next();
   });
-  registerTrySceneHandlers(bot, new TrySceneManager());
+  const orientationPool = process.env.NABLON_TRY_EPISODE === 'last-copy-v1'
+    ? require('./orientation/telegram').registerConfiguredOrientation(bot, process.env)
+    : null;
+  if (!orientationPool) registerTrySceneHandlers(bot, new TrySceneManager());
   bot.start(async (ctx) => {
     await ctx.reply('Это временная проверка Nablon. Сейчас доступна только команда /try. Старый цикл прогнозов отключён.');
   });
@@ -50,11 +53,19 @@ async function main() {
       });
     }
     launchPolling();
-    process.once('SIGINT', () => { stopping = true; clearTimeout(retryTimer); bot.stop('SIGINT'); });
-    process.once('SIGTERM', () => { stopping = true; clearTimeout(retryTimer); bot.stop('SIGTERM'); });
+    function stop(signal) {
+      stopping = true;
+      clearTimeout(retryTimer);
+      server.close();
+      bot.stop(signal);
+      if (orientationPool) orientationPool.end().catch(() => {});
+    }
+    process.once('SIGINT', () => stop('SIGINT'));
+    process.once('SIGTERM', () => stop('SIGTERM'));
   } catch (err) {
     console.error('Try-only Telegram startup failed:', err.message);
     server.close();
+    if (orientationPool) await orientationPool.end();
     process.exitCode = 1;
     return;
   }
