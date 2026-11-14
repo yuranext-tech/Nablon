@@ -6,6 +6,7 @@ const { TrySceneManager } = require('./try_scene');
 const { registerTrySceneHandlers } = require('./try_scene_telegram');
 const { createHealthServer } = require('./health');
 const { ensureOrientationSchema } = require('./orientation/ensure_schema');
+const { installPollingWatchdog } = require('./orientation/polling_watchdog');
 
 async function main() {
   if (process.env.NABLON_RUNTIME_MODE !== 'try-only') {
@@ -50,11 +51,20 @@ async function main() {
     // Telegraf launch() runs the polling loop until shutdown, so awaiting it
     // would suppress the success log for the entire life of a healthy bot.
     let stopping = false;
+    const watchdog = installPollingWatchdog(bot, {
+      onStall: ({ elapsedMs, observedSuccess }) => {
+        console.error('Try-only Telegram getUpdates stalled:', elapsedMs, 'ms; successful poll observed:', observedSuccess);
+        // A live HTTP server is not evidence that Telegram polling is alive.
+        // Exit with failure so the hosting platform can restart the entire process.
+        process.exit(1);
+      },
+    });
     let retryTimer = null;
     let attempts = 0;
     function launchPolling() {
       if (stopping) return;
       attempts += 1;
+      watchdog.reset();
       console.log('Try-only Telegram polling attempt', attempts);
       bot.launch().then(() => {
         if (!stopping) console.error('Try-only Telegram polling stopped unexpectedly');
@@ -67,6 +77,7 @@ async function main() {
     function stop(signal) {
       stopping = true;
       clearTimeout(retryTimer);
+      watchdog.stop();
       server.close();
       bot.stop(signal);
       if (orientationPool) orientationPool.end().catch(() => {});

@@ -72,6 +72,10 @@ function createRepository(pool) {
     }
 
     const opening = action === 'start' || action === 'restart';
+    if (action === 'restart' && previous?.active) {
+      await client.query('UPDATE nablon_orientation_episodes SET active=false WHERE id=$1', [previous.id]);
+      previous = null;
+    }
     if (opening && previous) {
       return { status: 'RESUMED', episode: snapshot(previous) };
     }
