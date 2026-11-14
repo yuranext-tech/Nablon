@@ -197,6 +197,86 @@ test('isolated PostgreSQL and synthetic Telegram end to end', { skip: !url && 'S
     assert.equal(rows.filter((row) => row.fact.type === 'ACTION_ACCEPTED').length, 2);
   });
 
+  await t.test('one move after delivered help is assisted and a later move confirms understanding', async () => {
+    for (const stage of ['folder', 'files']) {
+      const user = randomInt(10_000_000, 10_000_000_000);
+      const bot = telegram(createRepository(pool));
+      const intro = await bot('try', 1, null, user);
+      const open = button(intro, 'Открыть папку');
+      if (stage === 'files') await bot('callback_query', 2, open, user);
+      const help = await bot('help', 3, null, user);
+      assert.match(help.message, /^Нажми кнопку с действием/);
+      const firstLabel = stage === 'folder' ? 'Открыть папку' : 'Открыть от 12 ноября';
+      const first = button(help, firstLabel);
+      const continued = await bot('callback_query', 4, first, user);
+      assert.doesNotMatch(continued.message, /Нажми кнопку/);
+      const id = first.split(':')[1];
+      const history = async () => (await pool.query(
+        'SELECT sequence, fact FROM nablon_orientation_events WHERE episode_id=$1 ORDER BY sequence', [id],
+      )).rows;
+      const before = await history();
+      assert.equal(before.findLast(({ fact }) => fact.type === 'ACTION_ACCEPTED').fact.afterHelp, true);
+      assert.deepEqual(before.filter(({ fact }) => fact.type === 'INTERFACE_CHECK_RECORDED')
+        .map(({ fact }) => fact.result), stage === 'folder' ? [] : ['assisted']);
+      assert.equal((await pool.query(
+        'SELECT count(*)::int AS count FROM nablon_orientation_telegram_sends WHERE episode_id=$1 AND command_id=$2',
+        [id, '3'],
+      )).rows[0].count, 1);
+
+      const resumed = telegram(createRepository(pool));
+      const result = await resumed('callback_query', 5, button(continued, 'Открыть от 14 ноября'), user);
+      assert.match(result.message, /Это последняя версия/);
+      const after = await history();
+      assert.deepEqual(after.slice(0, before.length), before);
+      assert.equal(after.findLast(({ fact }) => fact.type === 'ACTION_ACCEPTED').fact.afterHelp, false);
+      assert.equal(after.findLast(({ fact }) => fact.type === 'INTERFACE_CHECK_RECORDED').fact.result, 'confirmed');
+      const { rows: [episode] } = await pool.query('SELECT state FROM nablon_orientation_episodes WHERE id=$1', [id]);
+      assert.equal(episode.state.understanding, 'confirmed');
+      assert.equal(episode.state.helpRequested, true);
+      assert.equal(episode.state.goal, 'reached');
+    }
+  });
+
+  await t.test('an old button after failed help delivery refreshes the screen without advancing', async () => {
+    const user = randomInt(10_000_000, 10_000_000_000);
+    const bot = telegram(createRepository(pool));
+    const intro = await bot('try', 1, null, user);
+    const files = await bot('callback_query', 2, button(intro, 'Открыть папку'), user);
+    const stale = button(files, 'Открыть от 12 ноября');
+    const id = stale.split(':')[1];
+    assert.equal(await telegram(createRepository(pool), 'reply')('help', 3, null, user), undefined);
+    const episode = async () => (await pool.query(
+      'SELECT version, state FROM nablon_orientation_episodes WHERE id=$1', [id],
+    )).rows[0];
+    const history = async () => (await pool.query(
+      'SELECT sequence, fact FROM nablon_orientation_events WHERE episode_id=$1 ORDER BY sequence', [id],
+    )).rows;
+    const before = await episode();
+    const facts = await history();
+    assert.equal(before.version, 3);
+    assert.equal(before.state.stage, 'files');
+    assert.equal(before.state.helpPending, true);
+    assert.equal((await pool.query(
+      'SELECT count(*)::int AS count FROM nablon_orientation_telegram_sends WHERE episode_id=$1 AND command_id=$2',
+      [id, '3'],
+    )).rows[0].count, 0);
+    const resumed = telegram(createRepository(pool));
+    const refreshed = await resumed('callback_query', 4, stale, user);
+    assert.match(refreshed.message, /^Нажми кнопку с действием/);
+    const current = button(refreshed, 'Открыть от 12 ноября');
+    assert.notEqual(current, stale);
+    assert.deepEqual(await resumed('callback_query', 4, stale, user), refreshed);
+    assert.deepEqual(await episode(), before);
+    assert.deepEqual(await history(), facts);
+
+    const result = await resumed('callback_query', 5, current, user);
+    assert.match(result.message, /более свежий/);
+    assert.deepEqual(await resumed('callback_query', 5, current, user), result);
+    assert.equal((await episode()).version, 4);
+    assert.deepEqual((await history()).filter(({ fact }) => fact.type === 'ACTION_ACCEPTED')
+      .map(({ fact }) => [fact.action, fact.afterHelp]), [['open', false], ['old', true]]);
+  });
+
   await t.test('concurrent identical commands replay and changed input conflicts', async () => {
     const user = owner('race');
     const repo = createRepository(pool);

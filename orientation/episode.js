@@ -40,7 +40,10 @@ function advance(state, action, precedingVersion) {
   if (!actions.some(([, key]) => key === action)) return null;
 
   const next = { ...state, helpPending: false };
-  const events = [{ type: 'ACTION_ACCEPTED', action, precedingVersion }];
+  const events = [{
+    type: 'ACTION_ACCEPTED', action, precedingVersion,
+    ...(action !== 'finish' ? { afterHelp: state.helpPending } : {}),
+  }];
   if (action === 'finish') {
     next.stage = 'stopped';
     next.goal = 'not_reached';
@@ -49,9 +52,12 @@ function advance(state, action, precedingVersion) {
   } else {
     next.stage = action === 'old' ? 'old_open' : 'complete';
     if (action === 'latest') next.goal = 'reached';
-    if (state.stage === 'files') {
-      next.understanding = state.helpRequested ? 'assisted' : 'confirmed';
-      events.push({ type: 'INTERFACE_CHECK_RECORDED', result: next.understanding });
+    // The next content action consumes the help marker. Later actions can
+    // establish understanding without changing earlier observations.
+    const understanding = state.helpPending ? 'assisted' : 'confirmed';
+    if (state.understanding !== 'confirmed' && state.understanding !== understanding) {
+      next.understanding = understanding;
+      events.push({ type: 'INTERFACE_CHECK_RECORDED', result: understanding });
     }
   }
   events.push({ type: 'CONSEQUENCE_PREPARED', stage: next.stage, message: SCREENS[next.stage][0] });
