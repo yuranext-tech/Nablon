@@ -1,10 +1,11 @@
 // Isolated Telegram pilot. The orientation option uses its own R1 store.
 // Enable only by setting NABLON_RUNTIME_MODE=try-only on the Render service.
-// In-memory sessions are intentionally lost when the service restarts.
+// The fallback scene is in-memory; orientation sessions persist in their own database.
 const { Telegraf } = require('telegraf');
 const { TrySceneManager } = require('./try_scene');
 const { registerTrySceneHandlers } = require('./try_scene_telegram');
 const { createHealthServer } = require('./health');
+const { ensureOrientationSchema } = require('./orientation/ensure_schema');
 
 async function main() {
   if (process.env.NABLON_RUNTIME_MODE !== 'try-only') {
@@ -21,7 +22,17 @@ async function main() {
   const orientationPool = process.env.NABLON_TRY_EPISODE === 'last-copy-v1'
     ? require('./orientation/telegram').registerConfiguredOrientation(bot, process.env)
     : null;
-  if (!orientationPool) registerTrySceneHandlers(bot, new TrySceneManager());
+  if (orientationPool) {
+    try {
+      await ensureOrientationSchema(orientationPool);
+      console.log('Orientation database schema ready');
+    } catch (error) {
+      await orientationPool.end().catch(() => {});
+      throw error;
+    }
+  } else {
+    registerTrySceneHandlers(bot, new TrySceneManager());
+  }
   bot.start(async (ctx) => {
     await ctx.reply('Это временная проверка Nablon. Сейчас доступна только команда /try. Старый цикл прогнозов отключён.');
   });
