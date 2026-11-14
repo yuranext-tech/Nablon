@@ -7,6 +7,7 @@ const { registerTrySceneHandlers } = require('./try_scene_telegram');
 const { createHealthServer } = require('./health');
 const { ensureOrientationSchema } = require('./orientation/ensure_schema');
 const { installPollingWatchdog } = require('./orientation/polling_watchdog');
+const { createWebhookServer } = require('./orientation/webhook_server');
 
 async function main() {
   if (process.env.NABLON_RUNTIME_MODE !== 'try-only') {
@@ -38,7 +39,9 @@ async function main() {
     await ctx.reply('Это временная проверка Nablon. Сейчас доступна только команда /try. Старый цикл прогнозов отключён.');
   });
   bot.catch((err) => console.error('try-only Telegram handler error:', err.message));
-  const server = createHealthServer();
+  const useWebhook = process.env.NABLON_TELEGRAM_TRANSPORT === 'webhook';
+  const webhook = useWebhook ? createWebhookServer(bot, process.env.BOT_TOKEN) : null;
+  const server = webhook ? webhook.server : createHealthServer();
   const port = process.env.PORT || 3000;
   await new Promise((resolve) => server.listen(port, resolve));
   console.log('Try-only health server listening on port', port);
@@ -46,6 +49,26 @@ async function main() {
     // Do not drop pending Telegram messages; the old mode is intentionally disabled.
     const identity = await bot.telegram.getMe();
     console.log('Try-only Telegram identity:', '@' + identity.username);
+    if (useWebhook) {
+      bot.botInfo = identity;
+      const baseUrl = process.env.NABLON_WEBHOOK_BASE_URL;
+      if (!baseUrl || !/^https:\/\/[^/]+$/.test(baseUrl)) {
+        throw new Error('NABLON_WEBHOOK_BASE_URL must be an HTTPS origin without trailing slash');
+      }
+      await bot.telegram.setWebhook(baseUrl + webhook.path, {
+        secret_token: webhook.secret,
+        drop_pending_updates: false,
+        allowed_updates: ['message', 'callback_query'],
+      });
+      console.log('Try-only Telegram webhook registered');
+      function stopWebhook() {
+        server.close();
+        if (orientationPool) orientationPool.end().catch(() => {});
+      }
+      process.once('SIGINT', stopWebhook);
+      process.once('SIGTERM', stopWebhook);
+      return;
+    }
     await bot.telegram.deleteWebhook({ drop_pending_updates: false });
     console.log('Try-only Telegram polling requested');
     // Telegraf launch() runs the polling loop until shutdown, so awaiting it
