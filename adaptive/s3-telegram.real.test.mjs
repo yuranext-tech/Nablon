@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const { Pool } = require('pg');
 const { Telegraf } = require('telegraf');
 const { registerS3Telegram } = require('./s3-telegram');
-const { registerPersonalPreview, syntheticS2Entry } = require('./personal-preview');
+const { registerPersonalPreview, syntheticS2Entry, createPreviewEntryProvider } = require('./personal-preview');
 const { createS3Repository, RECEIPT_NAME } = require('./s3-postgres');
 const { intakePacket } = require('./s3-source');
 const { createOutboxSender } = require('../nablon/runtime/outbox');
@@ -389,4 +389,53 @@ test('private preview admits only its owner, waits for trusted S2 state, and kee
   assert.equal(E.offer(s3Source.state), 'choice');
   await press(runtime, 620, fixture.tg, command('S4A'));
   assert.equal(sent.at(-1)[1], C.scenarios.S4A);
+});
+
+test('preview /start creates a durable owner-only unknown S2 without a test fixture', async () => {
+  const owner = ++telegramId;
+  const bot = new Telegraf('12345:test-only');
+  bot.botInfo = { id: 12345, is_bot: true, first_name: 'Test', username: 'test_bot' };
+  const sent = [];
+  bot.telegram.sendMessage = async (...args) => { sent.push(args); };
+  bot.use(async (ctx,next) => {
+    ctx.answerCbQuery = async () => {};
+    return next();
+  });
+  registerPersonalPreview(bot, {
+    pool, ownerTelegramId: owner, loadS2Entry: createPreviewEntryProvider(pool),
+  });
+  const start = (updateId, sender) => bot.handleUpdate({
+    update_id: updateId,
+    message: { message_id: updateId,
+      from: { id: sender, first_name: 'Test' },
+      chat: { id: sender, type: 'private' }, text: '/start',
+      entities: [{ offset: 0, length: 6, type: 'bot_command' }] },
+  });
+  await start(701, owner+1000);
+  assert.equal(sent.length, 0);
+  await start(702, owner);
+  assert.equal(sent.length, 1);
+  const found = await pool.query(
+    `SELECT s.id, s.user_id, s.current_episode_id, s.training_id
+     FROM nablon_sessions s JOIN users u ON u.id=s.user_id
+     WHERE u.telegram_id=$1 AND s.status='ACTIVE'`, [owner]);
+  assert.equal(found.rows.length, 1);
+  assert.equal(found.rows[0].training_id, 'NABLON_PERSONAL_PREVIEW');
+  const ctx = { userId: found.rows[0].user_id, sessionId: found.rows[0].id,
+    episodeId: found.rows[0].current_episode_id };
+  const repository = createS3Repository(pool);
+  const opened = await repository.readSource(ctx);
+  assert.equal(opened.state.current.id, 'S2');
+  assert.equal(opened.state.current.delivery, 'unknown');
+  assert.equal(opened.state.previewOnly, true);
+  await start(703, owner);
+  assert.equal(sent.length, 1);
+  const buttons = sent[0][2].reply_markup.inline_keyboard.flat();
+  assert.deepEqual(buttons.map(x=>x.text), ['Скопировать карточку','Открыть настройки']);
+  await press({bot}, 704, owner, buttons.find(x=>x.callback_data.endsWith(':copy')).callback_data);
+  const played = await repository.readSource(ctx);
+  assert.equal(played.state.current.turns,1);
+  assert.equal(played.state.current.delivery,'unknown');
+  assert.equal(played.state.current.continued,false);
+  assert.equal((await repository.readPrimaryEvents(ctx)).filter(e=>e.type==='ACTION_ACCEPTED').length,1);
 });
