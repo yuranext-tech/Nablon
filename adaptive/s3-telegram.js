@@ -8,8 +8,8 @@ const { enqueueOutbox } = require('../nablon/runtime/outbox');
 const callback = /^(s2|s3):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):([0-5]):(copy|settings|check|delete|S4A|S4B)$/;
 const branches = ['S4A', 'S4B'];
 
-function registerS3Telegram(bot, { pool, flushOutbox, writeEvent, buttonLabels = {} }) {
-  const repository = createS3Repository(pool, { writeEvent, prepareReply });
+function registerS3Telegram(bot, { pool, flushOutbox, writeEvent, buttonLabels = {}, previewAllowUnknownS2 = false }) {
+  const repository = createS3Repository(pool, { writeEvent, prepareReply, previewAllowUnknownS2 });
 
   async function prepareReply(client, context, episode, events) {
     const destination = events.find(event => event.type === 'CONSEQUENCE_PREPARED' || event.type === 'EPISODE_OPENED');
@@ -75,7 +75,10 @@ function registerS3Telegram(bot, { pool, flushOutbox, writeEvent, buttonLabels =
   async function openS2(context, state, commandId) {
     // S2 retains its original gate. The caller supplies trusted engine state.
     // A Telegram send acknowledgement never enters that state.
-    if (state?.current?.delivery !== 'confirmed') throw new Error('S2 requires confirmed scenario presentation');
+    const previewEntry = previewAllowUnknownS2 === true && state?.previewOnly === true &&
+      state?.current?.id === 'S2' && state.current.delivery === 'unknown';
+    if (state?.current?.delivery !== 'confirmed' && !previewEntry)
+      throw new Error('S2 requires confirmed scenario presentation');
     const result = await repository.startS2(context, state, commandId);
     await sendCommitted(result, context.episodeId);
     return result;
