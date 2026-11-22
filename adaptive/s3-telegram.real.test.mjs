@@ -354,6 +354,8 @@ test('private preview admits only its owner, waits for trusted S2 state, and kee
   assert.equal(replies.length, 2);
   assert.deepEqual(await primary(other), []);
   entry = { ...entry, context: fixture.context };
+  await assert.rejects(start(6045, fixture.tg), /Preview S2 isolation mismatch/);
+  assert.deepEqual(await primary(fixture), []);
   await pool.query("UPDATE nablon_sessions SET training_id='NABLON_PERSONAL_PREVIEW' WHERE id=$1",
     [fixture.context.sessionId]);
   await start(605, fixture.tg);
