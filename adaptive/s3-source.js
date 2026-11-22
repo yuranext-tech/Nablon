@@ -59,7 +59,11 @@ function apply(journal, request, { now = iso } = {}) {
   const before = next.events.length;
   if (request.kind === 'action') engine.act(next, request.action);
   else if (request.kind === 'help') engine.help(next);
-  else engine.presentation(next, request.presentationKind, request.delivery, request.turn);
+  else {
+    // A transport acknowledgement or simulation report is not verified exposure.
+    // Keep the reported value in the canonical log, but do not promote it inside S3.
+    engine.presentation(next, request.presentationKind, 'unknown', request.turn);
+  }
 
   const delta = next.events.slice(before);
   const made = [];
