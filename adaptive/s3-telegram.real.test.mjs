@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const { Pool } = require('pg');
 const { Telegraf } = require('telegraf');
 const { registerS3Telegram } = require('./s3-telegram');
-const { registerPersonalPreview } = require('./personal-preview');
+const { registerPersonalPreview, syntheticS2Entry } = require('./personal-preview');
 const { createS3Repository, RECEIPT_NAME } = require('./s3-postgres');
 const { intakePacket } = require('./s3-source');
 const { createOutboxSender } = require('../nablon/runtime/outbox');
@@ -349,17 +349,22 @@ test('private preview admits only its owner, waits for trusted S2 state, and kee
   assert.deepEqual(await primary(fixture), []);
   assert.deepEqual(sent, []);
 
-  entry = { ...entry, state: reachS2(), context: other.context };
+  entry = { ...entry, state: syntheticS2Entry(), context: other.context };
   await start(604, fixture.tg);
   assert.equal(replies.length, 2);
   assert.deepEqual(await primary(other), []);
   entry = { ...entry, context: fixture.context };
+  await pool.query("UPDATE nablon_sessions SET training_id='NABLON_PERSONAL_PREVIEW' WHERE id=$1",
+    [fixture.context.sessionId]);
   await start(605, fixture.tg);
   await start(606, fixture.tg);
   assert.equal(sent.length, 1);
   assert.equal(String(sent[0][0]), String(fixture.tg));
   assert.equal(sent[0][1], C.scenarios.S2);
   assert.equal((await primary(fixture)).length, 1);
+  const firstSource = await fixture.repository.readSource(fixture.context);
+  assert.equal(firstSource.state.current.delivery, 'unknown');
+  assert.equal(firstSource.state.previewOnly, true);
   const buttons = () => sent.at(-1)[2].reply_markup.inline_keyboard.flat();
   const command = action => buttons().find(button => button.callback_data.endsWith(':' + action)).callback_data;
   const runtime = { bot };
@@ -374,6 +379,14 @@ test('private preview admits only its owner, waits for trusted S2 state, and kee
     await press(runtime, 610 + index, fixture.tg, command(action));
   }
   assert.deepEqual(buttons().map(button => button.text), ['Задача про календарь', 'Задача про старую карточку']);
+  const s3 = await pool.query("SELECT id FROM nablon_episodes WHERE session_id=$1 AND scene_id='S3'",
+    [fixture.context.sessionId]);
+  const s3Source = await fixture.repository.readSource({
+    ...fixture.context, episodeId: s3.rows[0].id,
+  });
+  assert.equal(s3Source.state.episodes.find(e => e.id === 'S2').delivery, 'unknown');
+  assert.equal(s3Source.state.episodes.find(e => e.id === 'S2').continued, false);
+  assert.equal(E.offer(s3Source.state), 'choice');
   await press(runtime, 620, fixture.tg, command('S4A'));
   assert.equal(sent.at(-1)[1], C.scenarios.S4A);
 });
