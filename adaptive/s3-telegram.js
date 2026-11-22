@@ -5,7 +5,8 @@ const { scenarios, consequences } = require('./content');
 const { createS3Repository } = require('./s3-postgres');
 const { enqueueOutbox } = require('../nablon/runtime/outbox');
 
-const callback = /^s3:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):([0-5]):(copy|check|delete)$/;
+const callback = /^(s2|s3):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):([0-5]):(copy|settings|check|delete|S4A|S4B)$/;
+const branches = ['S4A', 'S4B'];
 
 function registerS3Telegram(bot, { pool, flushOutbox, writeEvent }) {
   const repository = createS3Repository(pool, { writeEvent, prepareReply });
@@ -15,23 +16,14 @@ function registerS3Telegram(bot, { pool, flushOutbox, writeEvent }) {
     if (!destination) return;
     const opening = destination.type === 'EPISODE_OPENED';
     const { userId, sessionId, episodeId } = context;
-    if (opening) {
-      const assigned = await client.query(
-        `UPDATE nablon_sessions s SET current_episode_id=$1
-         WHERE s.id=$2 AND s.user_id=$3 AND s.status='ACTIVE'
-           AND (s.current_episode_id IS NULL OR EXISTS (
-             SELECT 1 FROM nablon_episodes e WHERE e.id=s.current_episode_id
-               AND e.session_id=s.id AND e.scene_id='S2' AND e.status='COMPLETED'
-           ))`,
-        [episodeId, sessionId, userId],
-      );
-      if (assigned.rowCount !== 1) throw new Error('No active S3 session');
-    }
     const { rows: [user] } = await client.query('SELECT id, telegram_id FROM users WHERE id=$1', [userId]);
-    const text = opening ? scenarios.S3 : consequences[destination.consequence];
-    if (!text) throw new Error('S3 reply text is missing');
-    const buttons = episode.done ? [] : ACTIONS.S3.map(action => ({
-      text: action, callback_data: `s3:${episodeId}:${episode.turns}:${action}`,
+    const text = opening ? scenarios[episode.id] : consequences[destination.consequence];
+    if (!text) throw new Error('Scene reply text is missing');
+    let choices = [];
+    if (episode.id === 'S2' && !episode.done) choices = ACTIONS.S2;
+    if (episode.id === 'S3') choices = episode.done ? branches : ACTIONS.S3;
+    const buttons = choices.map(action => ({
+      text: action, callback_data: `${episode.id.toLowerCase()}:${episodeId}:${episode.turns}:${action}`,
     }));
     await enqueueOutbox(client, {
       user, session: { id: sessionId }, episode: { id: episodeId },
@@ -40,35 +32,55 @@ function registerS3Telegram(bot, { pool, flushOutbox, writeEvent }) {
     });
   }
 
+  async function sendCommitted(result, episodeId) {
+    if (result.status !== 'APPLIED' && result.status !== 'REPLAYED') return;
+    await flushOutbox(20, episodeId);
+    const transition = result.canonicalEvents.find(event => event.nextEpisodeId);
+    if (transition) await flushOutbox(20, transition.nextEpisodeId);
+  }
+
   bot.use(async (ctx, next) => {
     const data = ctx.callbackQuery?.data;
-    if (typeof data !== 'string' || !data.startsWith('s3:')) return next();
+    if (typeof data !== 'string' || (!data.startsWith('s2:') && !data.startsWith('s3:'))) return next();
     const match = callback.exec(data);
     if (!match || ctx.chat?.type !== 'private' || !Number.isSafeInteger(ctx.from?.id) ||
         ctx.chat.id !== ctx.from.id || !Number.isSafeInteger(ctx.update?.update_id)) return;
-    const [, episodeId, turn, action] = match;
+    const [, prefix, episodeId, turn, action] = match;
+    const scene = prefix.toUpperCase();
+    const selecting = scene === 'S3' && branches.includes(action);
+    if (!selecting && !ACTIONS[scene].includes(action)) return;
     const { rows: [session] } = await pool.query(
       `SELECT s.id, s.user_id FROM nablon_sessions s
-       JOIN nablon_episodes e ON e.id=s.current_episode_id AND e.session_id=s.id
+       JOIN nablon_episodes e ON e.session_id=s.id
        JOIN users u ON u.id=s.user_id
-       WHERE e.id=$1 AND e.scene_id='S3' AND s.status='ACTIVE' AND u.telegram_id=$2`,
-      [episodeId, ctx.from.id],
+       WHERE e.id=$1 AND e.scene_id=$3 AND s.status='ACTIVE' AND u.telegram_id=$2`,
+      [episodeId, ctx.from.id, scene],
     );
     if (!session) return;
     const result = await repository.execute({ episodeId, userId: session.user_id, sessionId: session.id }, {
-      commandId: String(ctx.update.update_id), kind: 'action', action, expectedTurn: Number(turn),
+      commandId: String(ctx.update.update_id), expectedTurn: Number(turn),
+      ...(selecting ? { kind: 'branch', branch: action } : { kind: 'action', action }),
     });
-    if (result.status === 'APPLIED' || result.status === 'REPLAYED') await flushOutbox(20, episodeId);
+    await sendCommitted(result, episodeId);
     await ctx.answerCbQuery().catch(() => {});
   });
 
   async function openS3(context, state, commandId) {
     const result = await repository.start(context, state, commandId);
-    if (result.status === 'APPLIED' || result.status === 'REPLAYED') await flushOutbox(20, context.episodeId);
+    await sendCommitted(result, context.episodeId);
     return result;
   }
 
-  return { openS3 };
+  async function openS2(context, state, commandId) {
+    // S2 retains its original gate. The caller supplies trusted engine state.
+    // A Telegram send acknowledgement never enters that state.
+    if (state?.current?.delivery !== 'confirmed') throw new Error('S2 requires confirmed scenario presentation');
+    const result = await repository.startS2(context, state, commandId);
+    await sendCommitted(result, context.episodeId);
+    return result;
+  }
+
+  return { openS2, openS3 };
 }
 
 module.exports = { registerS3Telegram };

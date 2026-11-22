@@ -26,13 +26,15 @@ let pool;
 let schemaCreated = false;
 let telegramId = 2000;
 
+const episodePool = () => new Pool({ connectionString, options: '-c search_path=' + schema });
+
 before(async () => {
   const { rows: [db] } = await admin.query("SELECT current_setting('cluster_name') AS name, version()");
   assert.equal(db.name, 'eg-integration-p1-001');
   console.log(db.version);
   await admin.query(`CREATE SCHEMA "${schema}"`);
   schemaCreated = true;
-  pool = new Pool({ connectionString, options: '-c search_path=' + schema });
+  pool = episodePool();
   await pool.query(readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
 });
 after(async () => {
@@ -42,13 +44,18 @@ after(async () => {
   } finally { await admin.end(); }
 });
 
-function reachS3() {
+function reachS2() {
   const s = E.create();
   E.selectInterest(s, 'unknown');
   E.presentation(s, 'scenario', 'confirmed');
   E.act(s, 'add');
   E.next(s);
   E.presentation(s, 'scenario', 'confirmed');
+  return s;
+}
+
+function reachS3() {
+  const s = reachS2();
   E.act(s, 'copy');
   E.act(s, 'copy');
   E.next(s);
@@ -82,20 +89,25 @@ function transport({ writeEvent, failBeforeDrain, send = async () => {} } = {}) 
   return { ...route, bot, sent, legacy, flush };
 }
 
-async function open(runtime) {
+async function open(runtime, scene = 'S3') {
   const tg = ++telegramId;
   const { rows: [user] } = await pool.query('INSERT INTO users(telegram_id) VALUES($1) RETURNING id', [tg]);
   const context = { userId: user.id, sessionId: randomUUID(), episodeId: randomUUID() };
   await pool.query(`INSERT INTO nablon_sessions(id,user_id,session_number,mode,training_id,status)
     VALUES ($1,$2,1,'demo','EG-S3-TELEGRAM','ACTIVE')`, [context.sessionId, user.id]);
-  const result = await runtime.openS3(context, reachS3(), 'server-entry');
+  const result = scene === 'S2' ? await runtime.openS2(context, reachS2(), 'server-entry')
+    : await runtime.openS3(context, reachS3(), 'server-entry');
   assert.equal(result.status, 'APPLIED');
-  assert.equal(runtime.sent[0][1], C.scenarios.S3);
+  assert.equal(runtime.sent[0][1], C.scenarios[scene]);
   return { context, tg, repository: createS3Repository(pool) };
 }
 
 function update(runtime, { context, tg }, id, turn, action, from = tg) {
   const data = action === 'legacy' ? 'start_training' : `s3:${context.episodeId}:${turn}:${action}`;
+  return press(runtime, id, from, data);
+}
+
+function press(runtime, id, from, data) {
   return runtime.bot.handleUpdate({
     update_id: id, callback_query: { id: String(id), from: { id: from, first_name: 'Test' },
       message: { message_id: 1, chat: { id: from, type: 'private' } }, chat_instance: 'test', data },
@@ -193,4 +205,104 @@ test('stale or foreign S3 callbacks leave no action, and ordinary updates still 
   assert.equal((await actions(fixture)).length, 1);
   assert.equal((await queued(fixture)).length, 2);
   assert.deepEqual(runtime.legacy, [404]);
+});
+
+test('user completes S2, recovers S3 after failure, and selects S4 from the unknown-exposure offer', async () => {
+  let rollback = true;
+  let afterCommit = false;
+  const prior = transport({
+    failBeforeDrain: () => afterCommit,
+    writeEvent: async (args) => {
+      if (rollback && args.scenario_id === 'S3' && args.event_name === RECEIPT_NAME) {
+        rollback = false;
+        throw new Error('S3_CHECKPOINT_INTERRUPTED');
+      }
+      return recordL0Event(args);
+    },
+  });
+  prior.bot.catch(error => { throw error; });
+  const s2 = await open(prior, 'S2');
+  const buttons = runtime => runtime.sent.at(-1)[2].reply_markup.inline_keyboard.flat();
+  const choose = (runtime, choice) => buttons(runtime).find(button => button.text === choice).callback_data;
+  const listEpisodes = async () => (await pool.query(
+    'SELECT id, scene_id, turn_index, status FROM nablon_episodes WHERE session_id=$1 ORDER BY scene_id',
+    [s2.context.sessionId],
+  )).rows;
+  const current = async () => (await pool.query(
+    'SELECT current_episode_id FROM nablon_sessions WHERE id=$1', [s2.context.sessionId],
+  )).rows[0].current_episode_id;
+
+  await press(prior, 501, s2.tg, choose(prior, 'copy'));
+  assert.equal(prior.sent.at(-1)[1], C.consequences.two_of_three);
+  const nextS2 = choose(prior, 'copy');
+  await assert.rejects(press(prior, 502, s2.tg, nextS2), /S3_CHECKPOINT_INTERRUPTED/);
+  assert.deepEqual((await listEpisodes()).map(row => [row.scene_id, row.turn_index]), [['S2', 1]]);
+  assert.equal(await current(), s2.context.episodeId);
+  assert.equal((await queued(s2)).length, 2);
+
+  afterCommit = true;
+  await assert.rejects(press(prior, 502, s2.tg, nextS2), /COMMITTED_BEFORE_DRAIN/);
+  const s2History = await primary(s2);
+  assert.equal(s2History.filter(event => event.type === 'ACTION_ACCEPTED').length, 2);
+  const advance = s2History.find(event => event.type === 'SCENE_ADVANCED');
+  assert.equal(await current(), advance.nextEpisodeId);
+  assert.deepEqual((await listEpisodes()).map(row => row.scene_id), ['S2', 'S3']);
+
+  await pool.end();
+  pool = episodePool();
+  s2.repository = createS3Repository(pool);
+  const resumed = transport();
+  await press(resumed, 502, s2.tg, nextS2);
+  assert.deepEqual(resumed.sent.map(([, text]) => text), [C.consequences.three_of_three, C.scenarios.S3]);
+  await press(resumed, 502, s2.tg, nextS2);
+  await press(resumed, 503, s2.tg, nextS2);
+  assert.equal(resumed.sent.length, 2);
+  assert.deepEqual(await primary(s2), s2History);
+  const s3 = { ...s2, context: { ...s2.context, episodeId: advance.nextEpisodeId } };
+  assert.equal((await primary(s3))[0].previousEventId, advance.eventId);
+  assert.equal((await s3.repository.readSource(s3.context)).state.current.turns, 0);
+
+  for (const [index, action] of ['copy', 'copy', 'check', 'delete', 'copy'].entries()) {
+    await press(resumed, 510 + index, s3.tg, choose(resumed, action));
+  }
+  const source = await s3.repository.readSource(s3.context);
+  assert.equal(source.state.current.result, 'success');
+  assert.equal(source.state.current.changed, false);
+  assert.equal(E.offer(source.state), 'choice');
+  assert.deepEqual(buttons(resumed).map(button => button.text), ['S4A', 'S4B']);
+  const selection = choose(resumed, 'S4B');
+  const stale = selection.replace(':5:', ':4:');
+  await press(resumed, 520, s3.tg + 1000, selection);
+  await press(resumed, 521, s3.tg, stale);
+  assert.equal(await current(), s3.context.episodeId);
+  assert.equal((await primary(s3)).some(event => event.type === 'BRANCH_SELECTED'), false);
+
+  await press(resumed, 522, s3.tg, selection);
+  const sent = resumed.sent.length;
+  await press(resumed, 522, s3.tg, selection);
+  await press(resumed, 523, s3.tg, selection.replace('S4B', 'S4A'));
+  assert.equal(resumed.sent.length, sent);
+  assert.equal(resumed.sent.at(-1)[1], C.scenarios.S4B);
+  const s3History = await primary(s3);
+  const chosen = s3History.filter(event => event.type === 'BRANCH_SELECTED');
+  assert.equal(chosen.length, 1);
+  assert.equal(chosen[0].offer, 'choice');
+  assert.equal(chosen[0].nextSceneId, 'S4B');
+  assert.equal(await current(), chosen[0].nextEpisodeId);
+  const s4 = { ...s3.context, episodeId: chosen[0].nextEpisodeId };
+  assert.equal((await s3.repository.readSource(s4)).state.current.id, 'S4B');
+  assert.equal((await s3.repository.readPrimaryEvents(s4))[0].previousEventId, chosen[0].eventId);
+  assert.deepEqual((await listEpisodes()).map(row => row.scene_id), ['S2', 'S3', 'S4B']);
+
+  const consequence = s3History.find(event => event.consequence === 'copy_no_progress');
+  const nextAction = s3History.find(event => event.type === 'ACTION_ACCEPTED' && event.sequence > consequence.sequence);
+  const gate = createIntake({
+    scenes: [[E.VERSION, 'S2'], [E.VERSION, 'S3']],
+    readPrimaryEvents: id => id === s3.context.episodeId ? primary(s3) : [],
+  });
+  const finalSource = await s3.repository.readSource(s3.context);
+  const result = await gate(intakePacket(finalSource, consequence.eventId, nextAction.eventId));
+  assert.equal(result.status, 'accepted');
+  assert.equal(result.reason, 'EXPOSURE_UNKNOWN');
+  assert.equal(result.independence, 'unknown');
 });

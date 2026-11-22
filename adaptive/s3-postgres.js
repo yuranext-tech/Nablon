@@ -4,7 +4,9 @@
 // and per-command durable checkpoint/receipt. No schema extension or new service.
 // This is a repository boundary, NOT an enabled Telegram route.
 const { isDeepStrictEqual } = require('node:util');
-const { createSource, apply, restoreSource } = require('./s3-source');
+const { randomUUID } = require('node:crypto');
+const engine = require('./engine');
+const { createSceneSource, apply, restoreSource, recordTransition } = require('./s3-source');
 const { recordL0Event } = require('../nablon/runtime/l0-events');
 const FORMAT = 's3-source-v0.1';
 const EVENT_NAME = 'S3_CANONICAL_EVENT';
@@ -59,16 +61,16 @@ function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply } =
       [context.userId, context.sessionId, context.episodeId, RECEIPT_NAME]);
     return result.rows[0]?.payload ?? null;
   }
-  function args(context, eventName, turnIndex, payload) {
+  function args(context, sceneId, eventName, turnIndex, payload) {
     return { client: null, event_name: eventName, user_id: context.userId,
       session_id: context.sessionId, episode_id: context.episodeId,
-      set_id: FORMAT, scenario_id: 'S3', turn_index: turnIndex,
+      set_id: FORMAT, scenario_id: sceneId, turn_index: turnIndex,
       program_version: VERSION, runtime_version: FORMAT, payload };
   }
   async function facts(client, context, source, generated) {
     const byId = new Map();
     for (const event of generated) {
-      const input = args(context, EVENT_NAME, event.turn ?? 0, { event });
+      const input = args(context, source.sceneId, EVENT_NAME, event.turn ?? 0, { event });
       const row = await writeEvent({ ...input, client });
       // PostgreSQL is the authoritative clock. The adapter's in-memory time
       // never upgrades a Telegram send acknowledgement into an exposure fact.
@@ -80,7 +82,7 @@ function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply } =
     return generated.map(e => byId.get(e.eventId));
   }
   async function checkpoint(client, context, commandId, request, source, response) {
-    await writeEvent({ ...args(context, RECEIPT_NAME, source.state.current?.turns ?? 0,
+    await writeEvent({ ...args(context, source.sceneId, RECEIPT_NAME, source.state.current?.turns ?? 0,
       { commandId, request, source: clone(source), response: clone(response) }), client });
   }
   function replay(receipt, request) {
@@ -91,7 +93,30 @@ function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply } =
       : { status: 'CONFLICT', canonicalEvents: [] };
   }
 
-  async function start(context, state, commandId) {
+  async function openEpisode(client, context, state, sceneId, request, previousEpisodeId = null) {
+    const source = createSceneSource(state, sceneId, { newId: () => context.episodeId });
+    if (previousEpisodeId) source.events[0].previousEventId = request.previousEventId;
+    await client.query(`INSERT INTO nablon_episodes
+      (id, session_id, scene_id, turn_index, status, support_stage)
+      VALUES ($1,$2,$3,0,'WAITING_RESPONSE','NONE')`,
+    [context.episodeId, context.sessionId, sceneId]);
+    if (sceneId === 'S2' || previousEpisodeId || prepareReply) {
+      const assigned = await client.query(
+        `UPDATE nablon_sessions SET current_episode_id=$1 WHERE id=$2 AND user_id=$3 AND status='ACTIVE'
+           AND current_episode_id IS NOT DISTINCT FROM $4::text`,
+        [context.episodeId, context.sessionId, context.userId, previousEpisodeId],
+      );
+      if (assigned.rowCount !== 1) throw new Error('Episode is not the current transition');
+    }
+    const saved = await facts(client, context, source, source.events);
+    source.receipts.push({ commandId: request.commandId, request, canonicalEvents: clone(saved) });
+    const response = { status: 'APPLIED', canonicalEvents: clone(saved) };
+    if (prepareReply) await prepareReply(client, context, source.state.current, saved);
+    await checkpoint(client, context, request.commandId, request, source, response);
+    return response;
+  }
+
+  async function startScene(context, state, commandId, sceneId) {
     requireContext(context);
     if (typeof commandId !== 'string' || !commandId) throw new Error('Start command ID required');
     // The opening request is immutable; retries do not re-run the engine.
@@ -101,40 +126,31 @@ function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply } =
       const ep = await episodeRow(client, context);
       const earlier = await latest(client, context);
       if (earlier) {
-        if (ep?.scene_id !== 'S3') throw new Error('Scene mismatch');
+        if (ep?.scene_id !== sceneId) throw new Error('Scene mismatch');
         const opened = earlier.source?.receipts?.find(x => x.commandId === commandId);
         if (opened && isDeepStrictEqual(opened.request, request))
           return { status: 'REPLAYED', canonicalEvents: clone(opened.canonicalEvents) };
         return { status: 'CONFLICT', canonicalEvents: [] };
       }
-      if (ep) throw new Error('Episode already exists without S3 checkpoint');
-      const source = createSource(state, { newId: () => context.episodeId });
-      await client.query(`INSERT INTO nablon_episodes
-        (id, session_id, scene_id, turn_index, status, support_stage)
-        VALUES ($1,$2,'S3',0,'WAITING_RESPONSE','NONE')`,
-      [context.episodeId, context.sessionId]);
-      const saved = await facts(client, context, source, source.events);
-      source.receipts.push({ commandId, request, canonicalEvents: clone(saved) });
-      const response = { status: 'APPLIED', canonicalEvents: clone(saved) };
-      if (prepareReply) await prepareReply(client, context, source.state.current, saved);
-      await checkpoint(client, context, commandId, request, source, response);
-      return response;
+      if (ep) throw new Error('Episode already exists without checkpoint');
+      return openEpisode(client, context, state, sceneId, request);
     });
   }
 
   async function execute(context, request) {
     requireContext(context);
     if (!request || typeof request.commandId !== 'string' || !request.commandId ||
-        !['action','help','presentation'].includes(request.kind)) throw new Error('Invalid S3 request');
+        !['action','help','presentation','branch'].includes(request.kind)) throw new Error('Invalid S3 request');
     return transaction(async client => {
       const session = await lock(client, context);
       const ep = await episodeRow(client, context);
-      if (!ep || ep.scene_id !== 'S3') throw new Error('S3 episode not found');
+      if (!ep || !['S2', 'S3'].includes(ep.scene_id)) throw new Error('Actionable episode not found');
       const prior = await latest(client, context);
-      if (!prior || prior.source?.format !== FORMAT) throw new Error('No S3 starting checkpoint');
+      if (!prior || prior.source?.format !== FORMAT || prior.source.sceneId !== ep.scene_id)
+        throw new Error('No matching scene checkpoint');
       const duplicate = replay(prior, request);
       if (duplicate) return duplicate;
-      if (request.expectedTurn !== undefined &&
+      if ((request.expectedTurn !== undefined || request.kind === 'branch' || ep.scene_id === 'S2') &&
           (session.status !== 'ACTIVE' || session.current_episode_id !== context.episodeId)) {
         return { status: 'REJECTED', canonicalEvents: [] };
       }
@@ -142,19 +158,46 @@ function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply } =
       if (prior.source.receipts.some(x => x.commandId === request.commandId))
         return { status: 'CONFLICT', canonicalEvents: [] };
       const source = restoreSource(JSON.stringify(prior.source));
-      if (source.state.current?.done) return { status: 'REJECTED', canonicalEvents: [] };
       if (request.expectedTurn !== undefined && request.expectedTurn !== source.state.current.turns) {
         return { status: 'REJECTED', canonicalEvents: [] };
       }
-      const result = apply(source, request);
-      if (result.status !== 'APPLIED') return result;
-      const saved = await facts(client, context, source, result.canonicalEvents);
+      const selecting = request.kind === 'branch';
+      const episode = source.state.current;
+      let generated = [];
+      if (selecting) {
+        if (ep.scene_id !== 'S3' || !episode.done || !['S4A', 'S4B'].includes(request.branch)) {
+          return { status: 'REJECTED', canonicalEvents: [] };
+        }
+      } else {
+        if (episode.done) return { status: 'REJECTED', canonicalEvents: [] };
+        const result = apply(source, request);
+        if (result.status !== 'APPLIED') return result;
+        generated = result.canonicalEvents;
+      }
+      let next;
+      if (selecting || (ep.scene_id === 'S2' && source.state.current.done)) {
+        const nextState = engine.restore(JSON.stringify(source.state));
+        const offer = selecting ? engine.offer(nextState) : undefined;
+        engine.next(nextState, request.branch);
+        const nextContext = { ...context, episodeId: randomUUID() };
+        const destination = { nextEpisodeId: nextContext.episodeId, nextSceneId: nextState.current.id };
+        if (selecting) destination.offer = offer;
+        generated.push(recordTransition(source, request, destination));
+        next = { context: nextContext, state: nextState, sceneId: nextState.current.id };
+      }
+      const saved = await facts(client, context, source, generated);
       const response = { status: 'APPLIED', canonicalEvents: clone(saved) };
       await client.query('UPDATE nablon_episodes SET turn_index=$2,status=$3 WHERE id=$1',
         [context.episodeId, source.state.current.turns,
           source.state.current.done ? 'COMPLETED' : 'WAITING_RESPONSE']);
       if (prepareReply) await prepareReply(client, context, source.state.current, saved);
       await checkpoint(client, context, request.commandId, request, source, response);
+      if (next) {
+        const transition = saved.at(-1);
+        await openEpisode(client, next.context, next.state, next.sceneId, {
+          kind: 'transition', commandId: request.commandId, previousEventId: transition.eventId,
+        }, context.episodeId);
+      }
       return response;
     });
   }
@@ -177,6 +220,10 @@ function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply } =
       [context.userId, context.sessionId, context.episodeId, EVENT_NAME]);
     return r.rows.map(row => ({ ...row.payload.event, occurredAt: time(row.occurred_at) }));
   }
-  return { start, execute, readSource, readPrimaryEvents };
+  return {
+    start: (context, state, commandId) => startScene(context, state, commandId, 'S3'),
+    startS2: (context, state, commandId) => startScene(context, state, commandId, 'S2'),
+    execute, readSource, readPrimaryEvents,
+  };
 }
 module.exports = { createS3Repository, EVENT_NAME, RECEIPT_NAME };

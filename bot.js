@@ -27,7 +27,7 @@ const RESTART_BUTTON = Markup.inlineKeyboard([[Markup.button.callback('Прой�
 function id(prefix) { return prefix + '_' + crypto.randomUUID(); }
 
 const flushOutbox = createOutboxSender(pool, bot.telegram);
-const { openS3 } = registerS3Telegram(bot, { pool, flushOutbox });
+const { openS2, openS3 } = registerS3Telegram(bot, { pool, flushOutbox });
 
 // Telegram retries delivery of updates. Deduplicate at the runtime boundary so
 // the same update cannot start two sessions, answer twice, or advance an episode twice.
@@ -265,4 +265,4 @@ async function dailyCronTick() {
   }
 }
 
-module.exports={bot,pool,resumeActiveSessions,flushOutbox,dailyCronTick,recordL0Event,openS3};
+module.exports={bot,pool,resumeActiveSessions,flushOutbox,dailyCronTick,recordL0Event,openS2,openS3};

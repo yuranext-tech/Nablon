@@ -21,7 +21,7 @@ function createOutboxSender(pool, telegram) {
          WHERE ($1::text IS NULL OR episode_id=$1)
            AND ((status='PENDING' AND (next_attempt_at IS NULL OR next_attempt_at<=NOW()))
             OR (status='SENDING' AND claimed_at < NOW() - INTERVAL '5 minutes'))
-         ORDER BY created_at
+         ORDER BY created_at, id
          FOR UPDATE SKIP LOCKED LIMIT 1`, [episodeId]
       );
       row=r.rows[0];

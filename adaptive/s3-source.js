@@ -8,6 +8,7 @@ const { isDeepStrictEqual } = require('node:util');
 const engine = require('./engine');
 
 const SCENE = 'S3';
+const routeScenes = ['S2', SCENE, 'S4A', 'S4B'];
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const iso = () => new Date().toISOString();
 const clone = value => structuredClone(value);
@@ -24,17 +25,21 @@ function append(journal, type, commandId, fields, now) {
 }
 
 function createSource(state, { newId = randomUUID, now = iso } = {}) {
-  if (state?.current?.id !== SCENE || state.current.turns !== 0 || state.current.done ||
-      !state.events?.some(event => event.type === 'episode_started' && event.episode === SCENE) ||
+  return createSceneSource(state, SCENE, { newId, now });
+}
+
+function createSceneSource(state, sceneId, { newId = randomUUID, now = iso } = {}) {
+  if (!routeScenes.includes(sceneId) || state?.current?.id !== sceneId || state.current.turns !== 0 || state.current.done ||
+      !state.events?.some(event => event.type === 'episode_started' && event.episode === sceneId) ||
       state.version !== engine.VERSION) {
-    throw new Error('S3 must have just started via the original engine');
+    throw new Error('Scene must have just started via the original engine');
   }
   const episodeId = newId();
   if (!uuid.test(episodeId)) throw new Error('Invalid episode ID');
-  const journal = { format: 's3-source-v0.1', episodeId, sceneId: SCENE,
+  const journal = { format: 's3-source-v0.1', episodeId, sceneId,
     sceneVersion: engine.VERSION, state: clone(state), events: [], receipts: [] };
   append(journal, 'EPISODE_OPENED', `open:${episodeId}`,
-    { sceneId: SCENE, sceneVersion: engine.VERSION }, now);
+    { sceneId, sceneVersion: engine.VERSION }, now);
   return journal;
 }
 
@@ -55,7 +60,8 @@ function apply(journal, request, { now = iso } = {}) {
   // Clone before invoking the original engine so a thrown command cannot leave
   // the stored state half changed. No new interpretation is introduced here.
   const next = engine.restore(JSON.stringify(journal.state));
-  if (next.current?.id !== SCENE) throw new Error('Not in S3');
+  if (next.current?.id !== journal.sceneId || !['S2', SCENE].includes(journal.sceneId))
+    throw new Error('Not in an actionable scene');
   const before = next.events.length;
   if (request.kind === 'action') engine.act(next, request.action);
   else if (request.kind === 'help') engine.help(next);
@@ -74,7 +80,7 @@ function apply(journal, request, { now = iso } = {}) {
       commandId: request.commandId, occurredAt: now() });
   };
   if (request.kind === 'action') {
-    const action = delta.find(item => item.type === 'action' && item.episode === SCENE);
+    const action = delta.find(item => item.type === 'action' && item.episode === journal.sceneId);
     if (!action || delta.filter(item => item.type === 'action').length !== 1) throw new Error('Unrecorded action');
     record('ACTION_ACCEPTED', { action: action.action, turn: action.turn,
       reportedHelp: action.help });
@@ -106,16 +112,27 @@ function intakePacket(journal, consequenceId, nextActionId) {
 function restoreSource(json) {
   const source = JSON.parse(json);
   if (source?.format !== 's3-source-v0.1' || !uuid.test(source.episodeId) ||
-      source.sceneId !== SCENE || source.sceneVersion !== engine.VERSION ||
+      !routeScenes.includes(source.sceneId) || source.sceneVersion !== engine.VERSION ||
       !Array.isArray(source.events) || !Array.isArray(source.receipts) ||
       source.events[0]?.type !== 'EPISODE_OPENED' ||
-      source.events[0]?.sceneId !== SCENE ||
+      source.events[0]?.sceneId !== source.sceneId ||
       source.events.some((event, i) => event.episodeId !== source.episodeId ||
         event.eventId !== `${source.episodeId}:${i+1}` || event.sequence !== i+1)) {
     throw new Error('Invalid S3 source snapshot');
   }
   source.state = engine.restore(JSON.stringify(source.state));
+  if (source.state.current?.id !== source.sceneId) throw new Error('Invalid scene checkpoint');
   return source;
 }
 
-module.exports = { createSource, apply, intakePacket, restoreSource };
+function recordTransition(source, request, destination, now = iso) {
+  const type = request.kind === 'branch' ? 'BRANCH_SELECTED' : 'SCENE_ADVANCED';
+  append(source, type, request.commandId, destination, now);
+  const event = clone(source.events.at(-1));
+  const receipt = source.receipts.find(item => item.commandId === request.commandId);
+  if (receipt) receipt.canonicalEvents.push(event);
+  else source.receipts.push({ commandId: request.commandId, request: clone(request), canonicalEvents: [event] });
+  return event;
+}
+
+module.exports = { createSource, createSceneSource, apply, intakePacket, restoreSource, recordTransition };
