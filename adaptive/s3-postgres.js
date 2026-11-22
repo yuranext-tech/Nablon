@@ -26,7 +26,7 @@ function time(value) {
   if (!Number.isFinite(date.getTime())) throw new Error('Invalid database timestamp');
   return date.toISOString();
 }
-function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply } = {}) {
+function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply, previewAllowUnknownS2 = false } = {}) {
   if (!pool || typeof pool.connect !== 'function') throw new TypeError('PostgreSQL pool required');
   async function transaction(work) {
     const client = await pool.connect();
@@ -43,7 +43,7 @@ function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply } =
   async function lock(client, context) {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', ['s3:' + context.episodeId]);
     const session = await client.query(
-      'SELECT id, current_episode_id, status FROM nablon_sessions WHERE id=$1 AND user_id=$2 FOR UPDATE',
+      'SELECT id, current_episode_id, status, training_id FROM nablon_sessions WHERE id=$1 AND user_id=$2 FOR UPDATE',
       [context.sessionId, context.userId]);
     if (session.rowCount !== 1) throw new Error('S3 session not found or unauthorized');
     return session.rows[0];
@@ -122,7 +122,10 @@ function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply } =
     // The opening request is immutable; retries do not re-run the engine.
     const request = { kind: 'start', commandId, state: clone(state) };
     return transaction(async client => {
-      await lock(client, context);
+      const session = await lock(client, context);
+      if (sceneId === 'S2' && state?.previewOnly === true &&
+          (!previewAllowUnknownS2 || session.training_id !== 'NABLON_PERSONAL_PREVIEW' ||
+           state.current?.delivery !== 'unknown')) throw new Error('Preview S2 isolation mismatch');
       const ep = await episodeRow(client, context);
       const earlier = await latest(client, context);
       if (earlier) {
@@ -170,7 +173,11 @@ function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply } =
         }
       } else {
         if (episode.done) return { status: 'REJECTED', canonicalEvents: [] };
-        const result = apply(source, request);
+        const result = apply(source, request, {
+          previewAllowUnknownS2: previewAllowUnknownS2 === true &&
+            ep.scene_id === 'S2' && session.training_id === 'NABLON_PERSONAL_PREVIEW' &&
+            source.state.previewOnly === true,
+        });
         if (result.status !== 'APPLIED') return result;
         generated = result.canonicalEvents;
       }
