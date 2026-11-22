@@ -57,11 +57,13 @@ function presentation(s, kind, delivery, turn) {
 }
 function active(s) { if (s.status !== 'active' || !s.current || s.current.done) throw Error('episode not active'); return s.current; }
 function help(s) { const e = active(s); if (e.help !== 'none') throw Error('help already requested'); e.help = 'pending'; emit(s, 'help_requested', { episode: e.id }); }
-function act(s, action) {
+function act(s, action, { previewAllowUnknownS2 = false } = {}) {
   const e = active(s); if (!ACTIONS[e.id].includes(action)) throw Error('invalid action');
   // S3 permission to act must not depend on proof that a screen was displayed.
   // This does not confer independent-reaction evidence. Other frozen scenes retain their rule.
-  if (e.id !== 'S3' && e.delivery !== 'confirmed') throw Error('scenario not confirmed');
+  const previewS2 = e.id === 'S2' && e.delivery === 'unknown' &&
+    previewAllowUnknownS2 === true && s.previewOnly === true;
+  if (e.id !== 'S3' && e.delivery !== 'confirmed' && !previewS2) throw Error('scenario not confirmed');
   if (e.help === 'pending') throw Error('help pending');
   const priorNoProgress = e.noProgressObserved;
   const independentlyObserved = e.delivery === 'confirmed' && e.consequenceDelivery === 'confirmed' && e.help === 'none';
