@@ -46,7 +46,7 @@ function createSceneSource(state, sceneId, { newId = randomUUID, now = iso } = {
 // Transport supplies an immutable command ID (e.g. Telegram update ID).
 // A repeated ID with an identical request replays; changed content conflicts.
 // A successful command and its journal must be persisted together by the caller.
-function apply(journal, request, { now = iso } = {}) {
+function apply(journal, request, { now = iso, previewAllowUnknownS2 = false } = {}) {
   if (!journal || journal.format !== 's3-source-v0.1' ||
       typeof request?.commandId !== 'string' || !request.commandId ||
       !['action', 'help', 'presentation'].includes(request.kind)) {
@@ -63,7 +63,10 @@ function apply(journal, request, { now = iso } = {}) {
   if (next.current?.id !== journal.sceneId || !['S2', SCENE].includes(journal.sceneId))
     throw new Error('Not in an actionable scene');
   const before = next.events.length;
-  if (request.kind === 'action') engine.act(next, request.action);
+  if (request.kind === 'action') engine.act(next, request.action, {
+    previewAllowUnknownS2: previewAllowUnknownS2 === true && journal.sceneId === 'S2' &&
+      next.previewOnly === true,
+  });
   else if (request.kind === 'help') engine.help(next);
   else {
     // A transport acknowledgement or simulation report is not verified exposure.
