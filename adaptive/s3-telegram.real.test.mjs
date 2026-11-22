@@ -9,6 +9,7 @@ const require = createRequire(import.meta.url);
 const { Pool } = require('pg');
 const { Telegraf } = require('telegraf');
 const { registerS3Telegram } = require('./s3-telegram');
+const { registerPersonalPreview } = require('./personal-preview');
 const { createS3Repository, RECEIPT_NAME } = require('./s3-postgres');
 const { intakePacket } = require('./s3-source');
 const { createOutboxSender } = require('../nablon/runtime/outbox');
@@ -89,17 +90,22 @@ function transport({ writeEvent, failBeforeDrain, send = async () => {} } = {}) 
   return { ...route, bot, sent, legacy, flush };
 }
 
-async function open(runtime, scene = 'S3') {
+async function createSession() {
   const tg = ++telegramId;
   const { rows: [user] } = await pool.query('INSERT INTO users(telegram_id) VALUES($1) RETURNING id', [tg]);
   const context = { userId: user.id, sessionId: randomUUID(), episodeId: randomUUID() };
   await pool.query(`INSERT INTO nablon_sessions(id,user_id,session_number,mode,training_id,status)
     VALUES ($1,$2,1,'demo','EG-S3-TELEGRAM','ACTIVE')`, [context.sessionId, user.id]);
-  const result = scene === 'S2' ? await runtime.openS2(context, reachS2(), 'server-entry')
-    : await runtime.openS3(context, reachS3(), 'server-entry');
+  return { context, tg, repository: createS3Repository(pool) };
+}
+
+async function open(runtime, scene = 'S3') {
+  const fixture = await createSession();
+  const result = scene === 'S2' ? await runtime.openS2(fixture.context, reachS2(), 'server-entry')
+    : await runtime.openS3(fixture.context, reachS3(), 'server-entry');
   assert.equal(result.status, 'APPLIED');
   assert.equal(runtime.sent[0][1], C.scenarios[scene]);
-  return { context, tg, repository: createS3Repository(pool) };
+  return fixture;
 }
 
 function update(runtime, { context, tg }, id, turn, action, from = tg) {
@@ -305,4 +311,69 @@ test('user completes S2, recovers S3 after failure, and selects S4 from the unkn
   assert.equal(result.status, 'accepted');
   assert.equal(result.reason, 'EXPOSURE_UNKNOWN');
   assert.equal(result.independence, 'unknown');
+});
+
+test('private preview admits only its owner, waits for trusted S2 state, and keeps original command IDs', async () => {
+  const fixture = await createSession();
+  const other = await createSession();
+  const bot = new Telegraf('12345:test-only');
+  bot.botInfo = { id: 12345, is_bot: true, first_name: 'Test', username: 'test_bot' };
+  const sent = [];
+  const replies = [];
+  bot.telegram.sendMessage = async (...args) => { sent.push(args); };
+  bot.use(async (ctx, next) => {
+    ctx.reply = async (text) => { replies.push(text); };
+    ctx.answerCbQuery = async () => {};
+    return next();
+  });
+  let loaded = 0;
+  let entry;
+  registerPersonalPreview(bot, { pool, ownerTelegramId: fixture.tg, loadS2Entry: async (owner) => {
+    assert.equal(owner, fixture.tg);
+    loaded++;
+    return entry;
+  } });
+  const start = (id, sender, type = 'private') => bot.handleUpdate({
+    update_id: id, message: { message_id: id, from: { id: sender, first_name: 'Test' },
+      chat: { id: sender, type }, text: '/start', entities: [{ offset: 0, length: 6, type: 'bot_command' }] },
+  });
+  await start(601, other.tg);
+  await start(602, fixture.tg, 'group');
+  assert.equal(loaded, 0);
+  assert.deepEqual(replies, []);
+  const state = reachS2();
+  state.current.delivery = 'unknown';
+  entry = { context: fixture.context, state, commandId: 'owner-start' };
+  await start(603, fixture.tg);
+  assert.equal(replies.length, 1);
+  assert.deepEqual(await primary(fixture), []);
+  assert.deepEqual(sent, []);
+
+  entry = { ...entry, state: reachS2(), context: other.context };
+  await start(604, fixture.tg);
+  assert.equal(replies.length, 2);
+  assert.deepEqual(await primary(other), []);
+  entry = { ...entry, context: fixture.context };
+  await start(605, fixture.tg);
+  await start(606, fixture.tg);
+  assert.equal(sent.length, 1);
+  assert.equal(String(sent[0][0]), String(fixture.tg));
+  assert.equal(sent[0][1], C.scenarios.S2);
+  assert.equal((await primary(fixture)).length, 1);
+  const buttons = () => sent.at(-1)[2].reply_markup.inline_keyboard.flat();
+  const command = action => buttons().find(button => button.callback_data.endsWith(':' + action)).callback_data;
+  const runtime = { bot };
+  assert.deepEqual(buttons().map(button => button.text), ['Скопировать карточку', 'Открыть настройки']);
+  await press(runtime, 607, other.tg, command('copy'));
+  assert.deepEqual(await actions(fixture), []);
+  await press(runtime, 608, fixture.tg, command('copy'));
+  await press(runtime, 609, fixture.tg, command('copy'));
+  assert.deepEqual(buttons().map(button => button.text),
+    ['Скопировать карточку', 'Проверить сохранение', 'Удалить старый черновик']);
+  for (const [index, action] of ['copy', 'copy', 'check', 'delete', 'copy'].entries()) {
+    await press(runtime, 610 + index, fixture.tg, command(action));
+  }
+  assert.deepEqual(buttons().map(button => button.text), ['Задача про календарь', 'Задача про старую карточку']);
+  await press(runtime, 620, fixture.tg, command('S4A'));
+  assert.equal(sent.at(-1)[1], C.scenarios.S4A);
 });

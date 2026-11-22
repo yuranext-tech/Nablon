@@ -8,7 +8,7 @@ const { enqueueOutbox } = require('../nablon/runtime/outbox');
 const callback = /^(s2|s3):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):([0-5]):(copy|settings|check|delete|S4A|S4B)$/;
 const branches = ['S4A', 'S4B'];
 
-function registerS3Telegram(bot, { pool, flushOutbox, writeEvent }) {
+function registerS3Telegram(bot, { pool, flushOutbox, writeEvent, buttonLabels = {} }) {
   const repository = createS3Repository(pool, { writeEvent, prepareReply });
 
   async function prepareReply(client, context, episode, events) {
@@ -23,7 +23,8 @@ function registerS3Telegram(bot, { pool, flushOutbox, writeEvent }) {
     if (episode.id === 'S2' && !episode.done) choices = ACTIONS.S2;
     if (episode.id === 'S3') choices = episode.done ? branches : ACTIONS.S3;
     const buttons = choices.map(action => ({
-      text: action, callback_data: `${episode.id.toLowerCase()}:${episodeId}:${episode.turns}:${action}`,
+      text: buttonLabels[action] ?? action,
+      callback_data: `${episode.id.toLowerCase()}:${episodeId}:${episode.turns}:${action}`,
     }));
     await enqueueOutbox(client, {
       user, session: { id: sessionId }, episode: { id: episodeId },
