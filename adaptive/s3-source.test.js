@@ -95,7 +95,7 @@ test('help request is logged separately from help display claim and action', () 
   report(j, 'help-display', 'help', 'confirmed', undefined, now);
   const next = action(j, 'u2', 'check', now);
   assert.equal(req.canonicalEvents[0].type, 'HELP_REQUESTED');
-  assert.equal(next.canonicalEvents[0].reportedHelp, 'confirmed');
+  assert.equal(next.canonicalEvents[0].reportedHelp, 'unknown');
   assert.equal(j.events.some(e => e.type === 'HELP_PROVIDED_VERIFIED'), false);
 });
 
@@ -121,4 +121,12 @@ test('a finished S3 also records episode closing without modifying its result', 
   assert.equal(j.state.current.result, 'success');
   assert.equal(j.events.at(-1).type, 'PRESENTATION_REPORTED');
   assert(j.events.some(e => e.type === 'EPISODE_CLOSED' && e.result === 'success'));
+});
+
+test('S3 accepts action without a scenario presentation confirmation', () => {
+  const j = recorder();
+  const first = action(j, 'unknown-first', 'copy', clock());
+  assert.equal(first.status, 'APPLIED');
+  assert.equal(j.state.current.delivery, 'unknown');
+  assert.equal(j.state.current.turns, 1);
 });
