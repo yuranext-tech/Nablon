@@ -24,7 +24,7 @@ function time(value) {
   if (!Number.isFinite(date.getTime())) throw new Error('Invalid database timestamp');
   return date.toISOString();
 }
-function createS3Repository(pool, { writeEvent = recordL0Event } = {}) {
+function createS3Repository(pool, { writeEvent = recordL0Event, prepareReply } = {}) {
   if (!pool || typeof pool.connect !== 'function') throw new TypeError('PostgreSQL pool required');
   async function transaction(work) {
     const client = await pool.connect();
@@ -41,9 +41,10 @@ function createS3Repository(pool, { writeEvent = recordL0Event } = {}) {
   async function lock(client, context) {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', ['s3:' + context.episodeId]);
     const session = await client.query(
-      'SELECT id FROM nablon_sessions WHERE id=$1 AND user_id=$2 FOR UPDATE',
+      'SELECT id, current_episode_id, status FROM nablon_sessions WHERE id=$1 AND user_id=$2 FOR UPDATE',
       [context.sessionId, context.userId]);
     if (session.rowCount !== 1) throw new Error('S3 session not found or unauthorized');
+    return session.rows[0];
   }
   async function episodeRow(client, context) {
     const result = await client.query(
@@ -115,6 +116,7 @@ function createS3Repository(pool, { writeEvent = recordL0Event } = {}) {
       const saved = await facts(client, context, source, source.events);
       source.receipts.push({ commandId, request, canonicalEvents: clone(saved) });
       const response = { status: 'APPLIED', canonicalEvents: clone(saved) };
+      if (prepareReply) await prepareReply(client, context, source.state.current, saved);
       await checkpoint(client, context, commandId, request, source, response);
       return response;
     });
@@ -125,18 +127,25 @@ function createS3Repository(pool, { writeEvent = recordL0Event } = {}) {
     if (!request || typeof request.commandId !== 'string' || !request.commandId ||
         !['action','help','presentation'].includes(request.kind)) throw new Error('Invalid S3 request');
     return transaction(async client => {
-      await lock(client, context);
+      const session = await lock(client, context);
       const ep = await episodeRow(client, context);
       if (!ep || ep.scene_id !== 'S3') throw new Error('S3 episode not found');
       const prior = await latest(client, context);
       if (!prior || prior.source?.format !== FORMAT) throw new Error('No S3 starting checkpoint');
       const duplicate = replay(prior, request);
       if (duplicate) return duplicate;
+      if (request.expectedTurn !== undefined &&
+          (session.status !== 'ACTIVE' || session.current_episode_id !== context.episodeId)) {
+        return { status: 'REJECTED', canonicalEvents: [] };
+      }
       // A start ID cannot be reused with different content or a later command.
       if (prior.source.receipts.some(x => x.commandId === request.commandId))
         return { status: 'CONFLICT', canonicalEvents: [] };
       const source = restoreSource(JSON.stringify(prior.source));
       if (source.state.current?.done) return { status: 'REJECTED', canonicalEvents: [] };
+      if (request.expectedTurn !== undefined && request.expectedTurn !== source.state.current.turns) {
+        return { status: 'REJECTED', canonicalEvents: [] };
+      }
       const result = apply(source, request);
       if (result.status !== 'APPLIED') return result;
       const saved = await facts(client, context, source, result.canonicalEvents);
@@ -144,6 +153,7 @@ function createS3Repository(pool, { writeEvent = recordL0Event } = {}) {
       await client.query('UPDATE nablon_episodes SET turn_index=$2,status=$3 WHERE id=$1',
         [context.episodeId, source.state.current.turns,
           source.state.current.done ? 'COMPLETED' : 'WAITING_RESPONSE']);
+      if (prepareReply) await prepareReply(client, context, source.state.current, saved);
       await checkpoint(client, context, request.commandId, request, source, response);
       return response;
     });
