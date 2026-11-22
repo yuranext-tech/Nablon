@@ -4,6 +4,8 @@ const { Telegraf, Markup } = require('telegraf');
 const { Pool } = require('pg');
 const { SCENES, QUESTION_ANSWERS } = require('./probes');
 const { recordL0Event } = require('./nablon/runtime/l0-events');
+const { enqueueOutbox, createOutboxSender } = require('./nablon/runtime/outbox');
+const { registerS3Telegram } = require('./adaptive/s3-telegram');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -23,6 +25,9 @@ const QUESTION_BUTTONS = Markup.inlineKeyboard([
 const RESTART_BUTTON = Markup.inlineKeyboard([[Markup.button.callback('Пройти ещё раз', 'start_training')]]);
 
 function id(prefix) { return prefix + '_' + crypto.randomUUID(); }
+
+const flushOutbox = createOutboxSender(pool, bot.telegram);
+const { openS2, openS3 } = registerS3Telegram(bot, { pool, flushOutbox });
 
 // Telegram retries delivery of updates. Deduplicate at the runtime boundary so
 // the same update cannot start two sessions, answer twice, or advance an episode twice.
@@ -105,59 +110,6 @@ async function route(text, prompt) {
   }
 }
 function scene(ep) { return SCENES.find(s=>s.id===ep.scene_id); }
-
-async function enqueueOutbox(client, {user, session, episode=null, logicalKey, text, replyMarkup=null}) {
-  await client.query(
-    `INSERT INTO nablon_outbox
-      (user_id,session_id,episode_id,logical_key,chat_id,text,reply_markup,status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,'PENDING')
-     ON CONFLICT (logical_key) DO NOTHING`,
-    [user.id,session.id,episode?.id || null,logicalKey,user.telegram_id,text,replyMarkup ? JSON.stringify(replyMarkup) : null]
-  );
-}
-
-async function deliverOutbox() {
-  const client=await pool.connect();
-  let row=null;
-  try {
-    await client.query('BEGIN');
-    const r=await client.query(
-      `SELECT * FROM nablon_outbox
-       WHERE (status='PENDING' AND (next_attempt_at IS NULL OR next_attempt_at<=NOW()))
-          OR (status='SENDING' AND claimed_at < NOW() - INTERVAL '5 minutes')
-       ORDER BY created_at
-       FOR UPDATE SKIP LOCKED LIMIT 1`
-    );
-    row=r.rows[0];
-    if(!row){ await client.query('COMMIT'); return false; }
-    await client.query(
-      `UPDATE nablon_outbox SET status='SENDING',claimed_at=NOW(),attempts=attempts+1 WHERE id=$1`,
-      [row.id]
-    );
-    await client.query('COMMIT');
-  } catch(e) {
-    await client.query('ROLLBACK');
-    throw e;
-  } finally { client.release(); }
-
-  try {
-    const options=row.reply_markup ? {reply_markup:row.reply_markup} : undefined;
-    await bot.telegram.sendMessage(row.chat_id,row.text,options);
-    await pool.query("UPDATE nablon_outbox SET status='SENT',sent_at=NOW(),claimed_at=NULL,last_error=NULL WHERE id=$1 AND status='SENDING'",[row.id]);
-  } catch(e) {
-    const delaySeconds=Math.min(300,Math.max(15,15*Math.pow(2,Math.min(row.attempts-1,4))));
-    await pool.query(
-      "UPDATE nablon_outbox SET status='PENDING',claimed_at=NULL,next_attempt_at=NOW()+($2 * INTERVAL '1 second'),last_error=$3 WHERE id=$1 AND status='SENDING'",
-      [row.id,delaySeconds,String(e.message||e).slice(0,1000)]
-    );
-    console.error('outbox send:',row.logical_key,e.message);
-  }
-  return true;
-}
-
-async function flushOutbox(limit=20) {
-  for(let i=0;i<limit;i++){ if(!await deliverOutbox()) break; }
-}
 
 async function startEpisode(user,session,index) {
   const s=SCENES[index];
@@ -313,4 +265,4 @@ async function dailyCronTick() {
   }
 }
 
-module.exports={bot,pool,resumeActiveSessions,flushOutbox,dailyCronTick,recordL0Event};
+module.exports={bot,pool,resumeActiveSessions,flushOutbox,dailyCronTick,recordL0Event,openS2,openS3};
