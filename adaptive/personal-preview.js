@@ -4,6 +4,9 @@ const { registerS3Telegram } = require('./s3-telegram');
 const { createOutboxSender } = require('../nablon/runtime/outbox');
 const { randomUUID, createHash } = require('node:crypto');
 const engine = require('./engine');
+const { scenarios, consequences } = require('./content');
+const { createS3Repository } = require('./s3-postgres');
+const { previewTranslations, displayText } = require('./personal-preview-i18n');
 
 const TRAINING = 'NABLON_PERSONAL_PREVIEW';
 
@@ -68,16 +71,6 @@ function createPreviewEntryProvider(pool) {
   };
 }
 
-// Draft copy for the private walkthrough. Protocol commands stay unchanged.
-const BUTTON_LABELS = Object.freeze({
-  copy: 'Скопировать карточку',
-  settings: 'Открыть настройки',
-  check: 'Проверить сохранение',
-  delete: 'Удалить старый черновик',
-  S4A: 'Задача про календарь',
-  S4B: 'Задача про старую карточку',
-});
-
 const START_UNAVAILABLE = 'Предпросмотр пока не готов к началу.';
 
 function registerPersonalPreview(bot, { pool, ownerTelegramId, loadS2Entry = async () => null }) {
@@ -89,6 +82,55 @@ function registerPersonalPreview(bot, { pool, ownerTelegramId, loadS2Entry = asy
       return next();
     }
   });
+  // One-owner session: Ukrainian is always the process default.
+  // Russian requires an explicit user action. Language changes are preview-only
+  // and ephemeral; reopening the program restores the Ukrainian default.
+  let language = 'uk';
+  const t = () => previewTranslations(language);
+  const label = action => t().buttons[action] ?? action;
+  const localize = (kind, key, original) => displayText(language, kind, key, original);
+  const languageRow = () => [{ text: t().languageButton, callback_data: 'preview:language' }];
+  const repo = createS3Repository(pool);
+
+  // A language change re-renders the already committed scene, without
+  // generating a new action, confirmation, or canonical evidence event.
+  async function showCurrentScene(ctx) {
+    const result = await pool.query(
+      `SELECT s.id AS session_id, s.user_id, s.current_episode_id
+       FROM nablon_sessions s JOIN users u ON u.id=s.user_id
+       WHERE u.telegram_id=$1 AND s.status='ACTIVE' AND s.training_id=$2`,
+      [ownerTelegramId, TRAINING],
+    );
+    const session = result.rows[0];
+    if (!session?.current_episode_id) return ctx.reply(t().noSession);
+    const context = { userId: session.user_id, sessionId: session.session_id,
+      episodeId: session.current_episode_id };
+    const source = await repo.readSource(context);
+    if (!source) return ctx.reply(t().noSession);
+    const episode = source.state.current;
+    const lastConsequence = [...source.events].reverse()
+      .find(event => event.type === 'CONSEQUENCE_PREPARED');
+    const sourceKind = lastConsequence ? 'consequences' : 'scenarios';
+    const sourceKey = lastConsequence?.consequence ?? episode.id;
+    const original = lastConsequence ? consequences[sourceKey] : scenarios[sourceKey];
+    if (!original) throw new Error('Preview translation reference not found');
+    let choices = [];
+    if (episode.id === 'S2' && !episode.done) choices = engine.ACTIONS.S2;
+    if (episode.id === 'S3') choices = episode.done ? ['S4A', 'S4B'] : engine.ACTIONS.S3;
+    const keyboard = choices.length ? [choices.map(action => ({
+      text: label(action),
+      callback_data: `${episode.id.toLowerCase()}:${context.episodeId}:${episode.turns}:${action}`,
+    }))] : [];
+    keyboard.push(languageRow());
+    return ctx.reply(localize(sourceKind, sourceKey, original),
+      { reply_markup: { inline_keyboard: keyboard } });
+  }
+  const chooseLanguage = ctx => ctx.reply(t().chooseLanguage,
+    { reply_markup: { inline_keyboard: [[
+      { text: '🇺🇦 Українська', callback_data: 'preview:language:uk' },
+      { text: '🇷🇺 Русский', callback_data: 'preview:language:ru' },
+    ]] } });
+
   const flushOutbox = createOutboxSender(pool, {
     async sendMessage(chatId, ...args) {
       if (String(chatId) !== String(ownerTelegramId)) throw new Error('Preview recipient mismatch');
@@ -96,7 +138,19 @@ function registerPersonalPreview(bot, { pool, ownerTelegramId, loadS2Entry = asy
     },
   });
   const { openS2 } = registerS3Telegram(bot, {
-    pool, flushOutbox, buttonLabels: BUTTON_LABELS, previewAllowUnknownS2: true,
+    pool, flushOutbox, buttonLabels: label, previewAllowUnknownS2: true,
+    displayText: localize, languageButton: () => t().languageButton,
+  });
+
+  bot.command('language', chooseLanguage);
+  bot.action('preview:language', async ctx => {
+    await ctx.answerCbQuery().catch(() => {});
+    await chooseLanguage(ctx);
+  });
+  bot.action(/^preview:language:(uk|ru)$/, async ctx => {
+    language = ctx.match[1];
+    await ctx.answerCbQuery().catch(() => {});
+    await showCurrentScene(ctx);
   });
 
   bot.start(async (ctx) => {
