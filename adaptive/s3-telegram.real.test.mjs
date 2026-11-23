@@ -448,3 +448,52 @@ test('preview /start creates a durable owner-only unknown S2 without a test fixt
   assert.equal(played.state.current.continued,false);
   assert.equal((await repository.readPrimaryEvents(ctx)).filter(e=>e.type==='ACTION_ACCEPTED').length,1);
 });
+
+test('owner preview starts in Ukrainian and switches to Russian only by explicit button', async () => {
+  const fixture = await createSession();
+  await pool.query("UPDATE nablon_sessions SET training_id='NABLON_PERSONAL_PREVIEW' WHERE id=$1",
+    [fixture.context.sessionId]);
+  const bot = new Telegraf('12345:test-only');
+  bot.botInfo = { id: 12345, is_bot: true, first_name: 'Test', username: 'test_bot' };
+  const sent = [];
+  bot.telegram.sendMessage = async (...args) => { sent.push(args); };
+  bot.use(async (ctx, next) => {
+    ctx.answerCbQuery = async () => {};
+    return next();
+  });
+  registerPersonalPreview(bot, {
+    pool, ownerTelegramId: fixture.tg,
+    loadS2Entry: async () => ({ context: fixture.context, state: syntheticS2Entry(),
+      commandId: 'language-entry' }),
+  });
+  const start = () => bot.handleUpdate({
+    update_id: 801, message: { message_id: 801,
+      from: { id: fixture.tg, first_name: 'Test' },
+      chat: { id: fixture.tg, type: 'private' }, text: '/start',
+      entities: [{ offset: 0, length: 6, type: 'bot_command' }] },
+  });
+  await start();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][1], previewTranslations('uk').scenarios.S2);
+  const initialButtons = sent[0][2].reply_markup.inline_keyboard.flat();
+  assert.deepEqual(initialButtons.map(x => x.text),
+    ['Скопіювати картку', 'Відкрити налаштування', '🌐 Мова']);
+  assert.equal((await primary(fixture)).length, 1);
+  await press({ bot }, 802, fixture.tg, 'preview:language');
+  assert.equal(sent.at(-1)[1], 'Оберіть мову:');
+  const choiceButtons = sent.at(-1)[2].reply_markup.inline_keyboard.flat();
+  assert.deepEqual(choiceButtons.map(x => x.text), ['🇺🇦 Українська', '🇷🇺 Русский']);
+  await press({ bot }, 803, fixture.tg, 'preview:language:ru');
+  assert.equal(sent.at(-1)[1], C.scenarios.S2);
+  assert.equal((await primary(fixture)).length, 1);
+  const russianButtons = sent.at(-1)[2].reply_markup.inline_keyboard.flat();
+  assert.deepEqual(russianButtons.map(x => x.text),
+    ['Скопировать карточку', 'Открыть настройки', '🌐 Язык']);
+  await press({ bot }, 804, fixture.tg,
+    russianButtons.find(x => x.callback_data.endsWith(':copy')).callback_data);
+  assert.equal(sent.at(-1)[1], C.consequences.two_of_three);
+  const source = await fixture.repository.readSource(fixture.context);
+  assert.equal(source.state.current.delivery, 'unknown');
+  assert.equal(source.state.current.continued, false);
+  assert.equal((await primary(fixture)).filter(x => x.type === 'ACTION_ACCEPTED').length, 1);
+});
