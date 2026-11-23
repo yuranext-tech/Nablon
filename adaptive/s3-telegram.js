@@ -8,7 +8,7 @@ const { enqueueOutbox } = require('../nablon/runtime/outbox');
 const callback = /^(s2|s3):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):([0-5]):(copy|settings|check|delete|S4A|S4B)$/;
 const branches = ['S4A', 'S4B'];
 
-function registerS3Telegram(bot, { pool, flushOutbox, writeEvent, buttonLabels = {}, previewAllowUnknownS2 = false }) {
+function registerS3Telegram(bot, { pool, flushOutbox, writeEvent, buttonLabels = {}, previewAllowUnknownS2 = false, displayText, languageButton }) {
   const repository = createS3Repository(pool, { writeEvent, prepareReply, previewAllowUnknownS2 });
 
   async function prepareReply(client, context, episode, events) {
@@ -17,19 +17,26 @@ function registerS3Telegram(bot, { pool, flushOutbox, writeEvent, buttonLabels =
     const opening = destination.type === 'EPISODE_OPENED';
     const { userId, sessionId, episodeId } = context;
     const { rows: [user] } = await client.query('SELECT id, telegram_id FROM users WHERE id=$1', [userId]);
-    const text = opening ? scenarios[episode.id] : consequences[destination.consequence];
-    if (!text) throw new Error('Scene reply text is missing');
+    const sourceKind = opening ? 'scenarios' : 'consequences';
+    const sourceKey = opening ? episode.id : destination.consequence;
+    const originalText = opening ? scenarios[episode.id] : consequences[destination.consequence];
+    if (!originalText) throw new Error('Scene reply text is missing');
+    const text = displayText ? displayText(sourceKind, sourceKey, originalText) : originalText;
     let choices = [];
     if (episode.id === 'S2' && !episode.done) choices = ACTIONS.S2;
     if (episode.id === 'S3') choices = episode.done ? branches : ACTIONS.S3;
     const buttons = choices.map(action => ({
-      text: buttonLabels[action] ?? action,
+      text: (typeof buttonLabels === 'function' ? buttonLabels(action) : buttonLabels[action]) ?? action,
       callback_data: `${episode.id.toLowerCase()}:${episodeId}:${episode.turns}:${action}`,
     }));
+    const keyboard = buttons.length ? [buttons] : [];
+    if (typeof languageButton === 'function') {
+      keyboard.push([{ text: languageButton(), callback_data: 'preview:language' }]);
+    }
     await enqueueOutbox(client, {
       user, session: { id: sessionId }, episode: { id: episodeId },
       logicalKey: `s3:${destination.eventId}`, text,
-      replyMarkup: buttons.length ? { inline_keyboard: [buttons] } : null,
+      replyMarkup: keyboard.length ? { inline_keyboard: keyboard } : null,
     });
   }
 
