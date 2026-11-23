@@ -333,6 +333,9 @@ test('private preview admits only its owner, waits for trusted S2 state, and kee
     loaded++;
     return entry;
   } });
+  // This test intentionally rejects /start; do not let Telegraf's default
+  // handler set process.exitCode=1 for the expected exception.
+  bot.catch(error => { throw error; });
   const start = (id, sender, type = 'private') => bot.handleUpdate({
     update_id: id, message: { message_id: id, from: { id: sender, first_name: 'Test' },
       chat: { id: sender, type }, text: '/start', entities: [{ offset: 0, length: 6, type: 'bot_command' }] },
