@@ -58,7 +58,8 @@ async function main() {
     bot.catch(err => console.error('Preview update failed:', err.message));
     // Telegraf long polling stays pending until the bot stops; awaiting it
     // here would prevent the outbox timer and launch notice from ever running.
-    const polling = bot.launch({ dropPendingUpdates: true });
+    // Preserve the queued owner-identification update when switching from the webhook.
+    const polling = bot.launch({ dropPendingUpdates: false });
     started = true;
     polling.catch(async err => {
       if (closing) return;
