@@ -10,6 +10,7 @@ const { Pool } = require('pg');
 const { Telegraf } = require('telegraf');
 const { registerS3Telegram } = require('./s3-telegram');
 const { registerPersonalPreview, syntheticS2Entry, createPreviewEntryProvider } = require('./personal-preview');
+const { displayText, previewTranslations } = require('./personal-preview-i18n');
 const { createS3Repository, RECEIPT_NAME } = require('./s3-postgres');
 const { intakePacket } = require('./s3-source');
 const { createOutboxSender } = require('../nablon/runtime/outbox');
@@ -365,7 +366,7 @@ test('private preview admits only its owner, waits for trusted S2 state, and kee
   await start(606, fixture.tg);
   assert.equal(sent.length, 1);
   assert.equal(String(sent[0][0]), String(fixture.tg));
-  assert.equal(sent[0][1], C.scenarios.S2);
+  assert.equal(sent[0][1], displayText('uk', 'scenarios', 'S2', C.scenarios.S2));
   assert.equal((await primary(fixture)).length, 1);
   const firstSource = await fixture.repository.readSource(fixture.context);
   assert.equal(firstSource.state.current.delivery, 'unknown');
@@ -373,17 +374,19 @@ test('private preview admits only its owner, waits for trusted S2 state, and kee
   const buttons = () => sent.at(-1)[2].reply_markup.inline_keyboard.flat();
   const command = action => buttons().find(button => button.callback_data.endsWith(':' + action)).callback_data;
   const runtime = { bot };
-  assert.deepEqual(buttons().map(button => button.text), ['Скопировать карточку', 'Открыть настройки']);
+  assert.deepEqual(buttons().map(button => button.text),
+    ['Скопіювати картку', 'Відкрити налаштування', '🌐 Мова']);
   await press(runtime, 607, other.tg, command('copy'));
   assert.deepEqual(await actions(fixture), []);
   await press(runtime, 608, fixture.tg, command('copy'));
   await press(runtime, 609, fixture.tg, command('copy'));
   assert.deepEqual(buttons().map(button => button.text),
-    ['Скопировать карточку', 'Проверить сохранение', 'Удалить старый черновик']);
+    ['Скопіювати картку', 'Перевірити збереження', 'Видалити стару чернетку', '🌐 Мова']);
   for (const [index, action] of ['copy', 'copy', 'check', 'delete', 'copy'].entries()) {
     await press(runtime, 610 + index, fixture.tg, command(action));
   }
-  assert.deepEqual(buttons().map(button => button.text), ['Задача про календарь', 'Задача про старую карточку']);
+  assert.deepEqual(buttons().map(button => button.text),
+    ['Завдання про календар', 'Завдання про стару картку', '🌐 Мова']);
   const s3 = await pool.query("SELECT id FROM nablon_episodes WHERE session_id=$1 AND scene_id='S3'",
     [fixture.context.sessionId]);
   const s3Source = await fixture.repository.readSource({
@@ -393,7 +396,7 @@ test('private preview admits only its owner, waits for trusted S2 state, and kee
   assert.equal(s3Source.state.episodes.find(e => e.id === 'S2').continued, false);
   assert.equal(E.offer(s3Source.state), 'choice');
   await press(runtime, 620, fixture.tg, command('S4A'));
-  assert.equal(sent.at(-1)[1], C.scenarios.S4A);
+  assert.equal(sent.at(-1)[1], displayText('uk', 'scenarios', 'S4A', C.scenarios.S4A));
 });
 
 test('preview /start creates a durable owner-only unknown S2 without a test fixture', async () => {
@@ -436,7 +439,8 @@ test('preview /start creates a durable owner-only unknown S2 without a test fixt
   await start(703, owner);
   assert.equal(sent.length, 1);
   const buttons = sent[0][2].reply_markup.inline_keyboard.flat();
-  assert.deepEqual(buttons.map(x=>x.text), ['Скопировать карточку','Открыть настройки']);
+  assert.deepEqual(buttons.map(x=>x.text),
+    ['Скопіювати картку','Відкрити налаштування','🌐 Мова']);
   await press({bot}, 704, owner, buttons.find(x=>x.callback_data.endsWith(':copy')).callback_data);
   const played = await repository.readSource(ctx);
   assert.equal(played.state.current.turns,1);
