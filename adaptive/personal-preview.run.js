@@ -32,7 +32,14 @@ async function main() {
     if (closing) return;
     closing = true;
     if (timer) clearInterval(timer);
-    if (started) bot.stop(signal);
+    if (started) {
+      try { bot.stop(signal); }
+      catch (error) {
+        // Polling may fail before Telegraf marks the bot as running.
+        if (signal !== 'POLLING_FAILURE' && signal !== 'STARTUP_FAILURE')
+          console.error('Preview stop failed:', error.message);
+      }
+    }
     await pool.end();
   };
   process.once('SIGINT', () => { shutdown('SIGINT').catch(console.error); });
@@ -49,12 +56,22 @@ async function main() {
       loadS2Entry: createPreviewEntryProvider(pool),
     });
     bot.catch(err => console.error('Preview update failed:', err.message));
-    await bot.launch({ dropPendingUpdates: true });
+    // Telegraf long polling stays pending until the bot stops; awaiting it
+    // here would prevent the outbox timer and launch notice from ever running.
+    const polling = bot.launch({ dropPendingUpdates: true });
     started = true;
+    polling.catch(async err => {
+      if (closing) return;
+      console.error('Preview polling failed:', err.message);
+      process.exitCode = 1;
+      try { await shutdown('POLLING_FAILURE'); }
+      catch (shutdownError) { console.error('Preview shutdown failed:', shutdownError.message); }
+    });
     timer = setInterval(() => {
       flushOutbox(20).catch(err => console.error('Preview outbox error:', err.message));
     }, 30000);
-    console.log('Owner-only Nablon preview ready: https://t.me/' + me.username);
+    console.log('Owner-only Nablon preview polling initiated: https://t.me/' + me.username);
+    console.log('Confirm real readiness only after the owner receives the S2 reply to /start.');
     console.log('Personal walkthrough ends after opening S4; study data and Becoming are not used.');
   } catch (error) {
     await shutdown('STARTUP_FAILURE');
