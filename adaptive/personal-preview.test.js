@@ -31,3 +31,23 @@ test('a non-preview state cannot bypass S2 exposure even with a preview option',
   s.previewOnly=false;
   assert.throws(()=>E.act(s,'copy',{previewAllowUnknownS2:true}),/scenario not confirmed/);
 });
+
+test('preview Ukrainian text covers every existing scenario and consequence',()=>{
+  const {scenarios,consequences}=require('./content');
+  const {displayText,previewTranslations}=require('./personal-preview-i18n');
+  const ukrainian=previewTranslations('uk');
+  for(const [kind,source] of [['scenarios',scenarios],['consequences',consequences]]){
+    assert.deepEqual(Object.keys(ukrainian[kind]).sort(),Object.keys(source).sort());
+    for(const [key,text] of Object.entries(source)){
+      assert.equal(typeof displayText('uk',kind,key,text),'string');
+      assert.equal(displayText('ru',kind,key,text),text);
+    }
+  }
+  const labels=previewTranslations('uk').buttons;
+  const E=require('./engine');
+  for(const command of [...E.ACTIONS.S2,...E.ACTIONS.S3,'S4A','S4B']){
+    assert.equal(typeof labels[command],'string');
+    assert.ok(labels[command].length>0);
+  }
+  assert.throws(()=>displayText('uk','scenarios','UNKNOWN','Original'),/Missing preview translation/);
+});
