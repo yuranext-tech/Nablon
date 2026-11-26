@@ -25,3 +25,8 @@ The current /try in Nablon/main is an isolated four-button technical prototype, 
 
 ## Governance
 Every substantive PR must cite approved primary sources, describe changed scenario texts and outcomes, and document independent editorial review. The GitHub workflow only checks presence of evidence, not truth or quality. To make it mandatory, configure main branch rules to require passing check `decision-gate`, PR review and disallow bypass/direct push. Without those settings this is advisory.
+
+
+## Навигация: утверждённое дополнение 2026-11-26
+
+Пять общих норм ARCH-001–005 утверждены владельцем; точный источник — [единый закреплённый реестр](https://github.com/yuranext-tech/development-control/blob/ea413bb8c842a39fb2e9109b57f59a781ed6d4cc/docs/architecture/APPROVED_PRINCIPLES_2026-11-26.json). Локальная точка применения — [датированное дополнение](PROCEDURAL_CONTROL_APPROVED_2026-11-08.md#утверждённое-дополнение-от-2026-11-26--архитектурная-память-arch-001005). Эта навигационная запись не изменяет прежние утверждённые нормы; научные кандидаты остаются PROPOSED, технический шлюз не реализован.
